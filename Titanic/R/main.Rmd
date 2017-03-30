@@ -5,6 +5,7 @@ output:
   html_document:
     number_sections: true
     toc: true
+    toc_depth: 2
     fig_width: 7
     fig_height: 4.5
     theme: readable
@@ -31,7 +32,7 @@ A lot of people use a random forest as first choice.
 However, I have seen nobody using a plain old linear discriminant analysis.
 This is usually one of my first choices, so I will use it here.
 
-```{r}
+```{r, message=FALSE, warning=FALSE, results='hide'}
 library(data.table) # database-like tables
 library(vcd) # actually just for mosaic plot
 library(ggplot2) # general plots
@@ -39,7 +40,7 @@ library(sda) # shrinkage discriminant analysis
 ```
 
 Let's load the data.
-I'm belong to the `data.table` people here.
+I belong to the `data.table` people here.
 
 ```{r}
 test <- read.csv("../input/test.csv")
@@ -52,14 +53,16 @@ str(test)
 
 Some of the factors should be `character`, so...
 
-```{r}
+```{r, message=FALSE, warning=FALSE, results='hide'}
 train[, Name := as.character(Name)]
 train[, Ticket := as.character(Ticket)]
 train[, Cabin := as.character(Cabin)]
 train[, Survived := as.factor(Survived)]
+train[, Pclass := as.factor(Pclass)]
 test[, Name := as.character(Name)]
 test[, Ticket := as.character(Ticket)]
 test[, Cabin := as.character(Cabin)]
+test[, Pclass := as.factor(Pclass)]
 ```
 
 
@@ -167,6 +170,7 @@ test[is.na(Fare), ]
 
 There is one NA *Fare* in the test set.
 We keep this for now.
+
 Also, in both *test* and *train* there are some weirdly high values of 512.3.
 What's up with these?
 
@@ -240,14 +244,21 @@ This is from `mrisdal`'s script and I will do it the same way.
 ```{r}
 train$Title <- gsub('(.*, )|(\\..*)', '', train$Name)
 table(train$Title)
+```
+
+```{r, message=FALSE, results='hide'}
 rare_title <- c('Dona', 'Lady', 'the Countess','Capt', 'Col', 'Don', 
                 'Dr', 'Major', 'Rev', 'Sir', 'Jonkheer')
 train[Title == "Mlle", Title := "Miss"]
 train[Title == "Ms", Title := "Miss"]
 train[Title == "Mme", Title := "Mrs"]
 train[Title %in% rare_title, Title := "Rare Title"]
+```
+
+```{r}
 table(train$Title, train$Sex)
 ```
+
 
 ### Surnames
 
@@ -331,13 +342,16 @@ cabins.
 
 The first character in the Cabin number is the deck.
 
-```{r}
+```{r, results='hide'}
 train$Deck <- vapply(
   train$Cabin, 
   function(x) strsplit(x, "")[[1]][1],
   character(1)
 )
 train[is.na(Deck), Deck := ""]
+```
+
+```{r}
 table(train$Deck)
 ```
 
@@ -405,14 +419,15 @@ panel.cor <- function(x, y, digits = 2, cex.cor, ...) {
   txt <- paste("r= ", txt, sep = "")
   text(0.5, 0.5, txt)
 }
-
-
 ```
 
 
-## Numeric Features
+## Numeric Features Overview
 
-```{r}
+The following plot should give us an idea about how the numerical features
+correlate among each others and how they relate to the survival rate.
+
+```{r, fig.height = 10, fig.width = 10}
 pairs(
   train[, .(Age, Fare, SibSp, Parch, FMembers, SNCount, nCabins)], 
   col = pal[train$Survived], 
@@ -436,7 +451,7 @@ However, some feature look good for prediction.
 Let's see if the age has a substantial effect on survival chances.
 I rather use densities here to compare distributions with different counts.
 
-```{r}
+```{r, warning=FALSE}
 ggplot(train) +
   geom_density(aes(x = Age, fill = Survived), alpha = .5) +
   theme_classic() +
@@ -453,10 +468,46 @@ have to design it by hand.
 But let's see the correlation for the binary feature *isChild*.
 
 ```{r}
-mosaic(structable(train[, .(isChild, Survived)]), shade = TRUE)
+mosaic(table(train[, .(isChild, Survived)],
+             dnn = c("isChild", "Survived")), shade = TRUE)
 ```
 
-This looks good.
+There is a correlation, but not as strong as expected.
+Maybe 18 is the wrong threshold.
+
+```{r}
+dt <- train[!is.na(train$Age), 
+            .(isU12 = Age < 12, isU14 = Age < 14,
+              isU16 = Age < 16, isU18 = Age < 18,
+              isU20 = Age < 20, isU22 = Age < 22,
+              Survived)]
+dt <- dt[, 
+   .(isU12 = sum(isU12) / length(isU12), isU14 = sum(isU14) / length(isU14),
+     isU16 = sum(isU16) / length(isU16), isU18 = sum(isU18) / length(isU18),
+     isU20 = sum(isU20) / length(isU20), isU22 = sum(isU22) / length(isU22)), 
+   by = Survived]
+dt <- melt(dt, measure.vars = 2:7, variable.name = "Distinction",
+           value.name = "People")
+f <- function(x) { x[2] / x[1] }
+dt <- dt[, .(Proportion = f(People)), by = Distinction]
+ggplot(dt, aes(x = Distinction, y = Proportion, fill = Proportion)) +
+  geom_bar(position = "dodge", stat = "identity") + 
+  theme_classic()
+```
+
+The proportion in the relative amount of people who survived between 2 age
+groups is highest if I split passangers into 2 groups by either being younger
+than 14 or being younger than 16.
+I chose 16.
+
+```{r}
+train$isU16 <- train$Age < 16
+mosaic(table(train[, .(isU16, Survived)],
+             dnn = c("isU16", "Survived")), shade = TRUE)
+```
+The correlation is a bit higher.
+
+
 
 ## SibSp
 
@@ -505,6 +556,42 @@ ggplot(train, aes(x = SNCount, fill = Survived)) +
 Similar to *SibSp* and *Parch*.
 They were also correlated.
 
+## Fare
+
+```{r, warning=FALSE}
+ggplot(train) +
+  geom_density(aes(x = Fare, fill = Survived), alpha = .5) +
+  theme_classic()
+ggplot(train) +
+  geom_density(aes(x = Fare, fill = Survived), alpha = .5) +
+  scale_x_continuous(trans = "log10") +
+  theme_classic()
+```
+
+So, people who payed more seem to have slightly better survival chances.
+The capitalism is strong with this one.
+
+## Pclass
+
+```{r}
+mosaic(table(train[, .(Pclass, Survived)], 
+             dnn = c("Pclass", "Survived")), shade = TRUE)
+```
+
+This feature is useful.
+Higher classes had better survial chances.
+This should be correlated to *Fare*.
+
+```{r}
+ggplot(train, aes(x = Pclass, y = Fare)) +
+  geom_violin(fill = "gray", color = "gray") +
+  geom_boxplot(varwidth = TRUE, alpha = .5) +
+  scale_y_continuous(trans = "log10") +
+  theme_classic()
+```
+
+Yes it is.
+
 ## Ticket Text
 
 ```{r}
@@ -532,23 +619,35 @@ ggplot(train, aes(x = TicketText2, fill = Survived)) +
   theme_classic()
 ```
 
-The "PC" label in the ticket might be a survival indicator.
+The *PC* label in the ticket might be a survival indicator.
 I should set up a dummy variable for this.
 
+```{r, results='hide'}
+train$TicketIsPC <- train$TicketText2 == "PC"
+```
 
-## Fare
+Does *PC* stand for the embarkment port?
+
+```{r}
+mosaic(table(train[, .(TicketIsPC, Embarked)],
+             dnn = c("isPC", "Embarked")), shade = TRUE)
+```
+
+Not really, people from Cherbourg and people form Southampton have it.
 
 ```{r}
 ggplot(train) +
-  geom_density(aes(x = Fare, fill = Survived), alpha = .5) +
-  theme_classic()
-ggplot(train) +
-  geom_density(aes(x = Fare, fill = Survived), alpha = .5) +
+  geom_density(aes(x = Fare, fill = TicketIsPC), alpha = .5) +
   scale_x_continuous(trans = "log10") +
   theme_classic()
 ```
 
-So, people who payed more seem to have better survival chances.
+Tickets with *PC* were more expensive overall.
+
+So, I just compared *TicketIsPC* to the other features but did not see any
+eye opening structure.
+I will save the plots and leave it like this.
+
 
 ## Deck
 
@@ -558,9 +657,72 @@ ggplot(train, aes(x = Deck, fill = Survived)) +
   theme_classic()
 ```
 
-Higher decks seem to have
+Except for *A* it looks as expected.
+I would have thought the deck *A* people had the highest survival chances.
+Aren't these the one who also payed most?
+
+```{r, warning=FALSE}
+ggplot(train, aes(x = Deck, y = Fare)) +
+  geom_violin(fill = "gray", color = "gray") +
+  geom_boxplot(varwidth = TRUE, alpha = .5) +
+  scale_y_continuous(trans = "log10") +
+  theme_classic()
+```
+
+Apparently not.
+The ticket fare to deck trend resembles the survival to deck trend.
+B to D payed the most, and they also had the highest survival rate.
+
+## Cabins
+
+Let's see the correlation of survival chances and cabin numbers on the ticket.
+
+```{r}
+ggplot(train, aes(x = nCabins, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+mosaic(table(train[, .(Survived, hasCabin)],
+             dnn = c("Survived", "hasCabin")), shade = TRUE)
+```
+
+So, having no cabin number on the ticket is a bad omen.
+
+## Embarked
+
+```{r}
+mosaic(table(train$Survived, train$Embarked,
+             dnn = c("Survived", "Embarked")), shade = TRUE)
+```
+
+Interestingly, people embarking from Cherbourg had higher survival chances.
+Is this related to one of the other features that we already found to correlate
+with survival?
+
+```{r}
+mosaic(table(train[, .(Embarked, hasCabin)],
+             dnn = c("Embarked", "hasCabin")), shade = TRUE)
+```
+
+Indeed, by far more people embarking form Cherbourg did have a cabin.
+And as indicated above having a cabin seemed to increase survival chances.
+Let's make a new feature for this.
+
+```{r}
+train$fromC <- train$Embarked == "C"
+mosaic(table(train[, .(Survived, fromC, hasCabin)], 
+             dnn = c("Survived", "fromC", "hasCabin")), shade = TRUE)
+```
+
+## Title
+
+```{r}
+ggplot(train, aes(x = Title, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+```
 
 
 
 
 
+***
