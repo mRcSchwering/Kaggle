@@ -1,0 +1,882 @@
+---
+title: "Keine Panik auf der Titanic"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 7
+    fig_height: 4.5
+    theme: readable
+    highlight: tango
+---
+
+
+
+
+
+
+
+# Introduction
+
+This is my first Kaggle script.
+Since, the Titanic set is recommended for beginners I will try this one first.
+While analyzing the dataset I will go through **Data Preparation**, 
+**Modeling**, and **Evaluation**.
+*Data Preparation* means I look at the data quality, extract features,
+and then explore these features.
+During *Modeling* the data shaped for the model class, a form of feature 
+selection is performed, and models are fit.
+In the *Evaluation* the models are compared by some metrics and a single model 
+is chosen. This model is then used for prediction with the test set.
+
+This sounds straight forward but usually it is not.
+It might happen that I go back and forth bewteen consecutive steps.
+For example, while exploring features I might stumble across another feature
+that can be extracted.
+
+### Linear Discriminant Analysis
+
+I have looked into some scripts for the Titanic set.
+A lot of people use a random forests as predictors.
+I have seen nobody using a linear discriminant analysis (LDA) yet.
+This is an old method.
+It is not that fancy but can be surprisingly versatile.
+I will use it in this script.
+
+### Loading Data
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(data.table) # database-like tables
+library(vcd) # just for mosaic plot
+library(ggplot2) # general plots
+library(sda) # LDA with shrinkage methods
+```
+
+Let's load the data.
+As you can see I belong to the `data.table` people.
+
+```{r}
+test <- read.csv("../input/test.csv")
+train <- read.csv("../input/train.csv")
+test <- data.table(test)
+train <- data.table(train)
+str(train)
+str(test)
+```
+
+Some classes should be adjusted.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+train[, Name := as.character(Name)]
+train[, Ticket := as.character(Ticket)]
+train[, Cabin := as.character(Cabin)]
+train[, Survived := as.factor(Survived)]
+train[, Pclass := as.factor(Pclass)]
+test[, Name := as.character(Name)]
+test[, Ticket := as.character(Ticket)]
+test[, Cabin := as.character(Cabin)]
+test[, Pclass := as.factor(Pclass)]
+```
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+# Data Preparation
+
+## Data Quality
+
+Here, I basically go through the data and see if there is something
+important like missing values or weird values.
+I don't really look at distributions or correlations yet.
+This is done in a later section.
+
+### PasserngerId
+
+This is a sanity check.
+
+```{r results='asis'}
+cat(sprintf(
+  "train has %d rows and %d unique passenger IDs\n",
+  nrow(train), length(unique(train$PassengerId))
+))
+cat(sprintf(
+  "test has %d rows and %d unique passenger IDs\n",
+  nrow(test), length(unique(test$PassengerId))
+))
+```
+
+### Survived
+
+This is a sanity check for the training labels.
+
+```{r}
+table(train$Survived)
+```
+
+### Pclass
+
+```{r}
+table(train$Pclass)
+table(test$Pclass)
+```
+
+### Name
+
+This will be an interesting feature.
+However, here I just check if it contains empty values or weirdly short names.
+
+```{r}
+head(train$Name)
+head(test$Name)
+any(nchar(train$Name) < 3)
+any(nchar(test$Name) < 3)
+```
+
+### Sex
+
+```{r}
+table(train$Sex)
+table(test$Sex)
+```
+
+### Age
+
+```{r}
+summary(train$Age)
+summary(test$Age)
+```
+
+Oh, there are many $NA$s. 
+I would guess this is an impotant feature, so probably we have to infer
+something here.
+The age range seems reasonable:
+from 2 months to 80 years old.
+
+### SibSp and Parch
+
+```{r}
+table(train$SibSp)
+table(test$SibSp)
+table(train$Parch)
+table(test$Parch)
+```
+
+### Ticket
+
+There is probably a lot to extract here, too.
+
+```{r}
+head(train$Ticket)
+head(test$Ticket)
+any(train$Ticket  == "")
+any(test$Ticket == "")
+```
+
+### Fare
+
+```{r}
+summary(train$Fare)
+summary(test$Fare)
+```
+
+There is one NA *Fare* in the test set.
+
+```{r}
+test[is.na(Fare), ]
+```
+
+Also, in both *test* and *train* there are some wildly high values of 512.3.
+What's up with these?
+
+```{r}
+train[Fare > 512, ]
+test[Fare > 512, ]
+```
+
+And there were free rides:
+
+```{r}
+train[Fare == 0, ]
+test[Fare == 0, ]
+```
+
+A lot of these also have *Age* missing.
+
+### Cabin
+
+```{r}
+head(train$Cabin)
+head(test$Cabin)
+table(train$Cabin == "")
+table(test$Cabin == "")
+```
+
+Oh, this looks bad.
+Most are empty.
+
+### Embarked
+
+```{r}
+table(train$Embarked)
+table(test$Embarked)
+train[Embarked == "", ]
+```
+
+In the training set there are 2 empty *Embarked* entries.
+Both survived, maybe they didn't embark.
+
+
+
+
+
+
+
+
+
+## Feature Extraction
+
+In general one could use some of these features already as they are.
+Now I see if I can extract some more features.
+This is quite exploratory.
+I go through the training set and see what I can do.
+However, I might find some interesting features only in later chapters.
+
+### Names
+
+I am starting with the *Names* column.
+Obviously one can extract *Surnames* and *Titles* from the names.
+The idea for the following code is taken from `mrisdal`'s Titanic kernel.
+Titles and surnames are extracted from the *Names* column.
+To reduce the number of titles a label *Rare Title* is created to mark all
+titles that did not appear that often.
+
+**Titles**
+
+```{r}
+train$Title <- gsub('(.*, )|(\\..*)', '', train$Name)
+table(train$Title)
+```
+
+```{r, message=FALSE, results='hide'}
+rare_title <- c('Dona', 'Lady', 'the Countess','Capt', 'Col', 'Don', 
+                'Dr', 'Major', 'Rev', 'Sir', 'Jonkheer')
+train[Title == "Mlle", Title := "Miss"]
+train[Title == "Ms", Title := "Miss"]
+train[Title == "Mme", Title := "Mrs"]
+train[Title %in% rare_title, Title := "Rare Title"]
+```
+
+```{r}
+table(train$Title, train$Sex)
+```
+
+
+**Surnames**
+
+The idea for this part is also form `mrisdal`.
+
+```{r}
+train$Surname <- vapply(
+  train$Name, 
+  function(x) strsplit(x, "[,. ]")[[1]][1],
+  character(1)
+)
+length(unique(train$Surname))
+any(train$Surname == "")
+```
+
+**Surname Count**
+
+I thought it would also be useful to have the number of people with identical
+surnames aboard as a feature.
+This might help later on when identifying families.
+
+```{r}
+counts <- table(train$Surname)
+train$SNCount <- vapply(
+  train$Surname, 
+  function(sn) counts[names(counts) == sn],
+  integer(1)
+)
+table(train$SNCount)
+```
+
+At first look this seems to have a similar trend as the *Parch* feature,
+which makes sense.
+
+### Age
+
+One important factor for survival is definitely the age.
+As far as I know women and children were the first to board the rescue boats.
+So, there should be a natural step in the *Age* feature at the age of 18.
+I will extract that as a binary feature.
+
+```{r}
+train$isChild <- as.integer(train$Age < 18)
+table(train$isChild)
+```
+
+### Families
+
+Families probably stayed together.
+So knowning the families would be good for prediction.
+Using cabin information, Sibling/Spouses and Parent/Children, and the names
+one could try to link family members.
+For now I will just extract the general family size.
+
+```{r}
+train$FMembers <- train$SibSp + train$Parch + 1
+table(train$FMembers)
+```
+
+### Ticket Text
+
+The tickets are not only numbers.
+
+```{r}
+txt <- toupper(gsub("[0-9\\. /]", "", train$Ticket))
+table(txt)
+```
+
+This seems to tell me the embarkment as well.
+But this factor has to many levels in my opinion.
+I will keep the most abundant levels and try to allocate the others
+by similarity (maybe that's wrong).
+For the ones I don't know how to allocate I will create a label *other*.
+
+```{r}
+table(txt)[table(txt) > 10]
+txt[txt == "AS"] <- "A"
+txt[txt %in% c("C", "CASOTON")] <- "CA"
+txt[txt %in% c("PC", "PPP", "PP")] <- "PC"
+txt[txt %in% c("SC", "SCA")] <- "SCPARIS"
+txt[txt %in% c("SOTONOQ", "STONO")] <- "SOTONO"
+txt[!(txt %in% c("", "SOTONO", "SCPARIS", "PC", "CA"))] <- "other"
+train$TicketText <- txt
+table(train$TicketText)
+```
+
+
+### Cabins
+
+The Cabin feature is very sparse.
+However, for those that have values, we can extract the deck symbol and the 
+number of cabins listed on the ticket.
+
+**Deck** 
+
+The highest deck should be *A*, the one below *B*, and so on.
+The first character in the *Cabin* number is the deck.
+
+```{r, results='hide'}
+train$Deck <- vapply(
+  train$Cabin, 
+  function(x) strsplit(x, "")[[1]][1],
+  character(1)
+)
+train[is.na(Deck), Deck := ""]
+```
+
+```{r}
+table(train$Deck)
+```
+
+**Number of Cabins**
+
+In some cases several cabins are listed.
+Maybe that will be important.
+
+```{r}
+train$nCabins <- vapply(
+  train$Cabin, 
+  function(x) length(strsplit(x, " ")[[1]]),
+  integer(1)
+)
+table(train$nCabins)
+```
+
+For the people who do not have a cabin I will also create a binary feature.
+
+```{r}
+train$hasCabin <- train$nCabins > 0
+```
+
+
+
+
+
+
+
+
+## Feature Exploration
+
+In this section I will look at feature distributions and -- importantly --
+correlations.
+This information is useful when constructing the final features for the model.
+
+As said before I want to use a linear discriminant analysis.
+For one, I want to make the features explain a lot of variance among the 
+*Survial* variable.
+To do that I might want to transform some of the current features.
+For another, I want to make the final features as orthogonal as possible,
+since highly correlated features will produce unstable coefficient estimates --
+and therefore high variance.
+Real data is always correlated in some way, and here I can see to what degree.
+
+Again, this is not a straight forward process.
+I might extract some more features along the way.
+
+
+### Numeric Features Overview
+
+At first I like to look at all numeric features, their correlation among each
+others and their influence on the target variable.
+A scatter plot matrix (SPLOM) is good for that.
+In the following scatter plot matrix blue indicates *survived*.
+
+```{r, fig.height = 10, fig.width = 10}
+# color palette for Survived label
+pal <- c("red", "blue")
+
+# pearson corelation coefficients for SPLOM 
+panel.cor <- function(x, y, digits = 2, cex.cor, ...) {
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  m <- cbind(x, y)
+  m <- m[complete.cases(m), ]
+  r <- cor(m[, 1], m[, 2])
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  txt <- paste("r= ", txt, sep = "")
+  text(0.5, 0.5, txt)
+}
+
+# SPLOM
+pairs(
+  train[, .(Age, Fare, SibSp, Parch, FMembers, SNCount, nCabins)], 
+  col = pal[train$Survived], 
+  pch = 20,
+  cex = 0.5,
+  lower.panel = panel.cor
+)
+```
+
+For discrete values one should be careful with the interpretation of these 
+scatter plots. These few points that can be seen in distinct places are in 
+reality many points plotted on top of each other.
+The pearson correlation coefficients are still useful though.
+
+For obvious reasons there is a high correlation between *SibSp* and *FMembers*, 
+and *Parch* and *FMembers* (created from each other).
+There is also a high correlation between *FMembers* and *SNCount*.
+The correlation of *SNCount* to either *SibSp* or *Parch* is moderately high.
+
+The remaining feature pairs do not show high correlations.
+
+### Age
+
+Let's see if the age has a substantial effect on survival chances.
+
+I will plot densities for such comparisons.
+Densities are nice in two ways.
+First, they integrate to 1 which means I can nicely compare distributions of
+2 features with different total counts.
+Second, they use a Gauss kernel with a certain binwidth (at least the 
+`geom_density` function) for smoothing.
+This way I see the local trend, while extreme values are surpressed.
+
+```{r, warning=FALSE}
+ggplot(train, aes(x = Age, fill = Survived)) +
+  geom_density(alpha = .5) +
+  theme_classic()
+```
+
+For both survivors and non-survivors the age distribution looks very similar.
+There seems to be just one clear trend chance between age 0 and 20.
+These are probably the children had preferential boarding.
+
+However, from this plot I can't say whether this "cut" is really at the 
+age of 18.
+I could look at the proportions of survivors and non-survivors in 2 age groups
+when setting the cut at different ages.
+
+```{r}
+dt <- train[!is.na(train$Age), 
+            .(isU12 = Age < 12, isU14 = Age < 14,
+              isU16 = Age < 16, isU18 = Age < 18,
+              isU20 = Age < 20, isU22 = Age < 22,
+              Survived)]
+dt <- dt[, 
+   .(isU12 = sum(isU12) / length(isU12), isU14 = sum(isU14) / length(isU14),
+     isU16 = sum(isU16) / length(isU16), isU18 = sum(isU18) / length(isU18),
+     isU20 = sum(isU20) / length(isU20), isU22 = sum(isU22) / length(isU22)), 
+   by = Survived]
+dt <- melt(dt, measure.vars = 2:7, variable.name = "Distinction",
+           value.name = "People")
+f <- function(x) { x[2] / x[1] }
+dt <- dt[, .(Proportion = f(People)), by = Distinction]
+ggplot(dt, aes(x = Distinction, y = Proportion, fill = Proportion)) +
+  geom_bar(position = "dodge", stat = "identity") + 
+  theme_classic()
+```
+
+According to this plot, 18 would not be a good age to group children and adults.
+I should rather use age 14.
+
+```{r}
+train$isU14 <- as.integer(train$Age < 14)
+mosaic(table(train[, .(isU14, Survived)],
+             dnn = c("isU14", "Survived")), shade = TRUE)
+```
+
+The mosaic plot visualizes the contingency table of 2 factors as rectangles.
+The color here shows the residuals of a model which assumes independence of both
+factors.
+So, the more colorful the rectangles, the less can they be explained by a 
+independence model.
+Here, this means feature *isU14* seems to explain the variance in *Survived*
+to some degree.
+
+### SibSp
+
+To visualize the dependency of *Survival* to a discrete variable I will use
+bar plots showing the proportion of survivors and non-survivors for each
+discrete value.
+
+```{r}
+ggplot(train, aes(x = SibSp, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  theme_classic()
+```
+
+It seems that large families in general had lower survival chances.
+Passangers with 1 spouse/sibling had the highest survival chances.
+But then people with zero spouses/sibling had lower survival chances 
+than those with one.
+
+Maybe families in general had higher survival chances because there were 
+children involved.
+But then for the larger families it was harder to get every one together in the
+chaos and that's why they again have lower survival chances.
+
+A LDA would not be able to distinguish this.
+Let's see how *SibSp* is distributed by plotting the total counts.
+
+```{r}
+ggplot(train, aes(x = SibSp, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+```
+
+Since there are not many cases of larger *SibSp* values it might also be that
+I just see some noise and not a trend.
+
+Anyway, I will create a feature that can linearly
+describe the trend from low to high survival chances.
+
+```{r}
+f <- function(x) { abs(1 - x) }
+train$SibSpMetric <- f(train$SibSp)
+ggplot(train, aes(x = SibSpMetric, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  theme_classic()
+```
+
+### Parch
+
+```{r}
+ggplot(train, aes(x = Parch, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  theme_classic()
+```
+
+The proportions show some kind of structure.
+
+```{r}
+ggplot(train, aes(x = Parch, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+```
+
+Since most counts are in 0 to 2 *Parch* and the proportions show an increasing
+trend in survival on this range, I would guess that with this feature the LDA
+will classify high values for *Parch* as survivors.
+On the other hand, there are not many cases with more than 2 *Parch*, and the
+trend in survival chances is just some noise.
+I will leave it for now.
+
+
+### FMembers
+
+```{r}
+ggplot(train, aes(x = FMembers, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+```
+
+This feature was created from *Parch* and *SibSp*.
+
+```{r}
+ggplot(train, aes(x = FMembers, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  theme_classic()
+```
+
+I think it makes sense to create a feature for those without siblings/spouses or
+parents/children.
+
+```{r}
+train$noFMembers <- train$FMembers < 2
+mosaic(table(train[, .(noFMembers, Survived)],
+             dnn = c("noFMembers", "Survived")), shade = TRUE)
+```
+
+
+### SNCount
+
+The *SNCount* was supposed to describe family sizes as well but it was derived
+from the *Name* feature.
+
+```{r}
+ggplot(train, aes(x = SNCount, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+```
+
+The distribution shows a similar trend to *SibSp* and *Parch*.
+They were also correlated.
+
+```{r}
+ggplot(train, aes(x = SNCount, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  theme_classic()
+```
+
+I will just leave this feature alone.
+
+### Fare
+
+```{r, warning=FALSE}
+ggplot(train) +
+  geom_density(aes(x = Fare, fill = Survived), alpha = .5) +
+  theme_classic()
+```
+
+I will spread this distribution with a log10.
+
+```{r, warning=FALSE}
+ggplot(train) +
+  geom_density(aes(x = Fare, fill = Survived), alpha = .5) +
+  scale_x_continuous(trans = "log10") +
+  theme_classic()
+```
+
+It looks like survival chances were higher if you had an expensive ticket.
+The capitalism is strong with this one.
+
+```{r}
+train$lFare <- log10(train$Fare)
+```
+
+
+
+
+
+### Pclass
+
+```{r}
+mosaic(table(train[, .(Pclass, Survived)], 
+             dnn = c("Pclass", "Survived")), shade = TRUE)
+```
+
+This feature looks useful.
+Higher classes had better survial chances.
+This should be correlated to *Fare*.
+
+```{r, warning=FALSE}
+ggplot(train, aes(x = Pclass, y = Fare)) +
+  geom_violin(fill = "gray", color = "gray") +
+  geom_boxplot(varwidth = TRUE, alpha = .5) +
+  scale_y_continuous(trans = "log10") +
+  theme_classic()
+```
+
+With more than 3 densities a single x axis can be crouded.
+That's why I like to use violin plots to show desities in a more compact way.
+The widths of the boxplots above visualize the abundance of the variable 
+values -- *Pclass*.
+
+### Ticket Text
+
+First, let me see if these labels are correlated to *Fare*...
+
+```{r, warning=FALSE}
+ggplot(train, aes(x = TicketText, y = Fare)) +
+  geom_violin(fill = "gray", color = "gray") +
+  geom_boxplot(varwidth = TRUE, alpha = .5) +
+  scale_y_continuous(trans = "log10") +
+  theme_classic()
+```
+
+They should be correlated to *Embarked*.
+
+```{r, fig.height=8}
+mosaic(table(train[, .(TicketText, Embarked)],
+             dnn = c("TicketText", "Embarked")), shade = TRUE)
+```
+
+Now, how do they explain *Survived*?
+
+```{r, fig.height=8}
+mosaic(table(train[, .(TicketText, Survived)],
+             dnn = c("TicketText", "Survived")), shade = TRUE)
+```
+
+This is hard to see but *PC* seems to be a useful information.
+I will create a dummy variable for this label.
+
+```{r}
+train$isPC <- train$TicketText == "PC"
+```
+
+Some correlation?
+
+```{r, warning=FALSE}
+ggplot(train) +
+  geom_density(aes(x = Fare, fill = isPC), alpha = .5) +
+  scale_x_continuous(trans = "log10") +
+  theme_classic()
+```
+
+Aha, tickets with *PC* were more expensive overall.
+
+### Deck
+
+```{r, fig.height=8}
+mosaic(table(train[, .(Deck, Survived)],
+             dnn = c("Deck", "Survived")), shade = TRUE)
+```
+
+Deck *B*, *C*, *D*, *E*, and the ones without a deck entry seems interesting.
+I will create dummy variables for them.
+
+```{r}
+train$DeckB <- train$Deck == "B"
+train$DeckC <- train$Deck == "C"
+train$DeckD <- train$Deck == "D"
+train$DeckE <- train$Deck == "E"
+train$noDeck <- train$Deck == ""
+```
+
+Are the decks correlated with *Fare*.
+
+```{r, warning=FALSE}
+ggplot(train, aes(x = Deck, y = Fare)) +
+  geom_violin(fill = "gray", color = "gray") +
+  geom_boxplot(varwidth = TRUE, alpha = .5) +
+  scale_y_continuous(trans = "log10") +
+  theme_classic()
+```
+
+Well, yes the ones without a *Deck* label payed significantly less.
+
+### Cabins
+
+Let's see the correlation of survival chances and cabin numbers on the ticket.
+
+```{r}
+ggplot(train, aes(x = nCabins, fill = Survived)) +
+  geom_bar(position = "dodge") + 
+  theme_classic()
+ggplot(train, aes(x = nCabins, fill = Survived)) +
+  geom_bar(position = "fill") + 
+  theme_classic()
+mosaic(table(train[, .(Survived, hasCabin)],
+             dnn = c("Survived", "hasCabin")), shade = TRUE)
+```
+
+So, having no cabin number on the ticket is a bad omen.
+
+### Embarked
+
+```{r}
+mosaic(table(train[, .(Embarked, Survived)],
+             dnn = c("Embarked", "Survived")), shade = TRUE)
+```
+
+Interestingly, people embarking from Cherbourg had higher survival chances.
+
+Is this related to whether they have a cabin?
+
+```{r}
+mosaic(table(train[, .(Embarked, hasCabin)],
+             dnn = c("Embarked", "hasCabin")), shade = TRUE)
+```
+
+Indeed, by far more people embarking form Cherbourg did have a cabin.
+Let's make a new feature for this.
+
+```{r}
+train$fromC <- train$Embarked == "C"
+mosaic(table(train[, .(Survived, fromC, hasCabin)], 
+             dnn = c("Survived", "fromC", "hasCabin")), shade = TRUE)
+```
+
+### Sex
+
+I think this one is obvious.
+
+```{r}
+mosaic(table(train[, .(Sex, Survived)],
+             dnn = c("Sex", "Survived")), shade = TRUE)
+```
+
+I just need to build a dummy variable for this.
+
+```{r}
+train$isMale <- train$Sex == "male"
+```
+
+### Title
+
+```{r, fig.height=8}
+mosaic(table(train[, .(Title, Survived)],
+             dnn = c("Title", "Survived")), shade = TRUE)
+```
+
+Well, needless to say this is due to the correlation of *Miss*, *Mrs* to
+*female*. 
+The interesting thing here is that *Master* and *Rare Title* have different 
+survival chances than *Mr*.
+
+```{r}
+mosaic(table(
+  train[Title %in% c("Rare Title", "Mr", "Master"), .(Title, Survived)],
+  dnn = c("Title", "Survived")), shade = TRUE)
+```
+
+A dummy variable for *Master*...
+
+```{r}
+train$isMaster <- train$Title == "Master"
+```
+
+
+
+
+***
+
+
