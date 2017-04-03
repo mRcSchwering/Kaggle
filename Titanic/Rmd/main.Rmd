@@ -760,7 +760,7 @@ We will also use both datasets for the imputation.
 ```{r, results='hide', message=FALSE}
 full <- rbind(
   train[, .(Age, Pclass, Sex, lFare, Parch, SibSp)],
-  test[, .(Age, Pclass, Sex, lFare = log(Fare + 1), Parch, SibSp)]
+  test[, .(Age, Pclass, Sex, lFare = log10(Fare + 1), Parch, SibSp)]
 )
 imp <- mice(full, seed = 42)
 ```
@@ -823,8 +823,7 @@ The best Model will ultimately be chosen for the prediction.
 
 First, I need to create the input matrix.
 I will call it $X$ as in $Y = f(X) + \epsilon$, where $f$ is the model
-$\epsilon$ is the bayes rate, $X$ is the input and $Y$ the output
-matrix.
+with input $X$, output $Y$, and error $\epsilon$.
 The input matrix has the form $N \times p$ with $N$ rows (the observations)
 and $p$ columns (the features or predictor variables).
 $Y$ is a class indicator matrix of $N \times 1$ where $0$ indicates 
@@ -946,7 +945,7 @@ With this assumption separating hyperplanes between classes are always linear.
 
 To get an idea what the LDA *sees* we can plot the class distributions along the
 1st discriminant coordinate.
-For 2 classes this is orthogonal of the separating hyperplane.
+For 2 classes this is the orthogonal of the separating hyperplane.
 As you can see below, there is a big overlap.
 We can exppect a high error rate.
 
@@ -955,13 +954,13 @@ fit <- lda(Xtrain, Ytrain)
 plot(fit)
 ```
 
-The warning about colinear variables was something I mentioned during data
+The warning about colinear variables is what I mentioned during data
 preparation.
 A variable that is colinear to another variable does not bring a lot of new 
 information.
 But it brings a lot of variance because its coefficient estimates are unstable.
 That's why it makes sense to kick out some variables --
-introducing bias and reducing variance.
+introducing bias in order to reduce variance.
 
 The function below does a forward feature selection.
 A model is built stepwise by starting at only an intercept and successivly 
@@ -969,7 +968,7 @@ adding a variable.
 Variable selection is done by minimizing the error rate, which is in turn
 estimated by 10-fold cross validation.
 This method is nested and greedy.
-I set `improvement = -1` so it will not stop until it included all variables.
+I set `improvement = -1` so it will not stop until all variables were included.
 
 ```{r, results='hide', message=FALSE, warning=FALSE}
 stepsLDA <- stepclass(Xtrain, grouping = Ytrain, 
@@ -984,7 +983,37 @@ The feature combination with the lowest error rate is...
 
 ```{r}
 idx <- which.max(stepsLDA$process$result.pm)
-(featsLDA <- as.character(stepsLDA$process$varname[1:idx]))
+as.character(stepsLDA$process$varname[1:idx])
+```
+
+Eventually I want to put the model selection process into a cross validation.
+Therefore, I write feature selection and the model fitting as a function.
+I will do a forward selection again, but this time I set `improvement = 0` to
+stop as soon as the error rate goes up again.
+I will also reduce set `fold = 5` in `stepclass()` to speed up the whole 
+process.
+
+```{r}
+predLDA <- function(trainX, trainY, testX, testY) {
+  # estimate best feature combination with CV
+  steps <- stepclass(
+    trainX, grouping = trainY, 
+    improvement = 0, method = "lda", direction = "forward",
+    fold = 5, output = FALSE
+  )
+  
+  # fit model with selected features
+  idx <- which.max(steps$process$result.pm)
+  feats <- as.character(steps$process$varname[1:idx])
+  trainX <- trainX[, colnames(trainX) %in% feats[-1]]
+  fit <- lda(trainX, grouping = trainY)
+  
+  # make prediction and return accuracy
+  testX <- testX[, colnames(testX) %in% feats[-1]]
+  pred <- predict(fit, newdata = testX)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
 ```
 
 ## QDA
@@ -992,43 +1021,67 @@ idx <- which.max(stepsLDA$process$result.pm)
 The assumption that classes share the same covariance matrix is sometimes
 too strict.
 If we estimate a covariance matrix for each class, we get a quadratic 
-separating hyperplane -- a QDA.
+separating hyperplane (therefore QDA).
 Now more parameters have to be estimated.
 
-I will do a forward selection again, but this time I set `improvement = 0` to
-stop as soon as the error rate goes up again.
-
 ```{r, results='hide', message=FALSE, warning=FALSE}
-stepsQDA <- stepclass(Xtrain, grouping = Ytrain, 
-                   improvement = 0, method = "qda", direction = "forward")
-plot(1 - stepsQDA$process$result.pm, type = "b", pch = 20,
-     ylab = "error rate", main = "RDA")
-idx <- which.max(stepsQDA$process$result.pm)
-(featsQDA <- as.character(stepsQDA$process$varname[1:idx]))
+predQDA <- function(trainX, trainY, testX, testY) {
+  # estimate best feature combination with CV
+  steps <- stepclass(
+    trainX, grouping = trainY, 
+    improvement = 0, method = "qda", direction = "forward",
+    fold = 5, output = FALSE
+  )
+  
+  # fit model with selected features
+  idx <- which.max(steps$process$result.pm)
+  feats <- as.character(steps$process$varname[1:idx])
+  trainX <- trainX[, colnames(trainX) %in% feats[-1]]
+  fit <- qda(trainX, grouping = trainY)
+  
+  # make prediction and return accuracy
+  testX <- testX[, colnames(testX) %in% feats[-1]]
+  pred <- predict(fit, newdata = testX)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
 ```
 
 ## RDA
 
-There is a middle ground between QDA and LDA which is a regularized discriminant
-analysis.
+There is a solution for a continuous shift from QDA to LDA which -- 
+a regularized discriminant analysis.
 Here you have 2 slide controls.
 One parameter adjusts how much of a shared and how much of separate covariance
 matrices are used.
 Another parameter adjusts to what degree the whole covariance matrix or just
 its diagonal is used.
-This method should be more robust to colinearity.
+This method is supposed to be more robust to colinearity.
 
 To estimate the best parameter combination RDA also uses cross validation.
-Here, I set `fold = 3` to make the whole process a bit faster.
+This takes quite long. Therefore I will reduce `fold = 3`.
 
 ```{r, results='hide', message=FALSE, warning=FALSE}
-stepsRDA <- stepclass(Xtrain, grouping = Ytrain, 
-                   improvement = 0, method = "rda", direction = "forward",
-                   fold = 3)
-plot(1 - stepsRDA$process$result.pm, type = "b", pch = 20,
-     ylab = "error rate", main = "SDA")
-idx <- which.max(stepsRDA$process$result.pm)
-(featsRDA <- as.character(stepsRDA$process$varname[1:idx]))
+predRDA <- function(trainX, trainY, testX, testY) {
+  # estimate best feature combination with CV
+  steps <- stepclass(
+    trainX, grouping = trainY, 
+    improvement = 0, method = "rda", direction = "forward",
+    fold = 3, output = FALSE
+  )
+  
+  # fit model with selected features
+  idx <- which.max(steps$process$result.pm)
+  feats <- as.character(steps$process$varname[1:idx])
+  trainX <- trainX[, colnames(trainX) %in% feats[-1]]
+  fit <- rda(trainX, grouping = trainY, fold = 3)
+  
+  # make prediction and return accuracy
+  testX <- testX[, colnames(testX) %in% feats[-1]]
+  pred <- predict(fit, newdata = testX)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
 ```
 
 
@@ -1038,18 +1091,31 @@ The last one is a bit more fancy.
 It is called shrinkage discriminant analysis.
 This is also a regularized linear discriminant analysis but the regularization
 method uses several James-Stein type estimators.
-This method was actually designed for high dimensionality problems, when
-you have $p \gg N$.
+This method was actually designed for high dimensionality problems -- 
+when you have $p \gg N$.
 It also has a feature ranking functionality but I won't use that here.
 
 ```{r, results='hide', message=FALSE, warning=FALSE}
-stepsSDA <- stepclass(Xtrain, grouping = Ytrain,
-                      improvement = 0, method = "sda", direction = "forward",
-                      verbose = FALSE)
-plot(1 - stepsSDA$process$result.pm, type = "b", pch = 20,
-     ylab = "error rate", main = "SDA")
-idx <- which.max(stepsSDA$process$result.pm)
-(featsSDA <- as.character(stepsSDA$process$varname[1:idx]))
+predSDA <- function(trainX, trainY, testX, testY) {
+  # estimate best feature combination with CV
+  steps <- stepclass(
+    trainX, grouping = trainY, 
+    improvement = 0, method = "sda", direction = "forward",
+    fold = 5, output = FALSE, verbose = FALSE
+  )
+  
+  # fit model with selected features
+  idx <- which.max(steps$process$result.pm)
+  feats <- as.character(steps$process$varname[1:idx])
+  trainX <- trainX[, colnames(trainX) %in% feats[-1]]
+  fit <- sda(trainX, L = trainY, verbose = FALSE)
+  
+  # make prediction and return accuracy
+  testX <- testX[, colnames(testX) %in% feats[-1]]
+  pred <- predict(fit, Xtest = testX, verbose = FALSE)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
 ```
 
 
@@ -1060,72 +1126,47 @@ idx <- which.max(stepsSDA$process$result.pm)
 CV <- list()
 ```
 
-I will do a final cross validation to estimate the Accuracy of each model
+Finally, a big cross validation is done to estimate the accuracy of each method
 and its standard error.
 I will use the `crossval` function for this.
-It takes care of keeping class proportions when splitting data.
-By default this repeats a 10-fold cross validation 20 times.
+It takes care of preserving class proportions when splitting data.
 
-```{r}
+By default this repeats a 10-fold cross validation 20 times.
+To reduce time, I set it to 3-fold and 5 times.
+Because RDA takes especially long it will only get 3 repetitions.
+Nevertheless, the following functions can take some minutes.
+(Be warned, I can't make `sda` shut up!)
+
+```{r, warning=FALSE, results='hide', message=FALSE}
 # LDA
-predLDA <- function(trainX, trainY, testX, testY) {
-  fit <- lda(trainX, grouping = trainY)
-  pred <- predict(fit, newdata = testX)$class
-  acc <- sum(pred == testY) / length(pred)
-  return(acc)
-}
-X <- Xtrain[, colnames(Xtrain) %in% featsLDA[-1]]
-CV$LDA <- crossval(predLDA, X, Ytrain, verbose = FALSE)
+CV$LDA <- crossval(predLDA, Xtrain, Ytrain, 
+                   verbose = FALSE, K = 3, B = 5)
 
 # QDA
-predQDA <- function(trainX, trainY, testX, testY) {
-  fit <- qda(trainX, grouping = trainY)
-  pred <- predict(fit, newdata = testX)$class
-  acc <- sum(pred == testY) / length(pred)
-  return(acc)
-}
-X <- Xtrain[, colnames(Xtrain) %in% featsQDA[-1]]
-CV$QDA <- crossval(predQDA, X, Ytrain, verbose = FALSE)
-```
+CV$QDA <- crossval(predQDA, Xtrain, Ytrain, 
+                   verbose = FALSE, K = 3, B = 5)
 
-I will reduce the folds and number of repeats for the RDA because it
-would take to long otherwise (it also uses a cross validation in the
-fitting process).
-
-```{r}
 # RDA
-predRDA <- function(trainX, trainY, testX, testY) {
-  fit <- rda(trainX, grouping = trainY, fold = 3)
-  pred <- predict(fit, newdata = testX)$class
-  acc <- sum(pred == testY) / length(pred)
-  return(acc)
-}
-X <- Xtrain[, colnames(Xtrain) %in% featsRDA[-1]]
-CV$RDA <- crossval(predRDA, X, Ytrain, verbose = FALSE, K = 5, B = 10)
+CV$RDA <- crossval(predRDA, Xtrain, Ytrain, 
+                   verbose = FALSE, K = 3, B = 3)
 
-# SDA
-predSDA <- function(trainX, trainY, testX, testY) {
-  fit <- sda(trainX, L = trainY, verbose = FALSE)
-  pred <- predict(fit, Xtest = testX, verbose = FALSE)$class
-  acc <- sum(pred == testY) / length(pred)
-  return(acc)
-}
-X <- Xtrain[, colnames(Xtrain) %in% featsSDA[-1]]
-CV$SDA <- crossval(predSDA, X, Ytrain, verbose = FALSE)
+# QDA
+CV$SDA <- crossval(predSDA, Xtrain, Ytrain, 
+                   verbose = FALSE, K = 3, B = 5)
 ```
 
 The plot below summarizes the results.
-*QDA* wins with more than 82% predicted accuracy.
-This model will be chosen for the final prediction.
+*QDA* is slightly better than *RDA* with more than 81% predicted accuracy.
+This method will be chosen for the final prediction.
 
-```{r}
+```{r, fig.width=8}
 l <- lapply(CV, function(i) { data.frame(Acc = i$stat, se = i$stat.se) })
 res <- do.call(rbind, l)
 res$Model <- rownames(res)
 ggplot(res, aes(x = Model, y = Acc)) +
-  geom_point() +
-  geom_errorbar(aes(ymax = Acc + se, ymin = Acc - se)) +
+  geom_pointrange(aes(ymax = Acc + se, ymin = Acc - se), color = "blue") +
   coord_flip() +
+  ggtitle("Predicted Accuracy with Standard Error") +
   theme_classic()
 ```
 
