@@ -48,10 +48,11 @@ In the modelling part I will try out a LDA and some of its cousins.
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 library(data.table) # database-like tables
 library(ggplot2) # general plots
+library(lattice) # also for plots
 library(mice) # for imputation
-library(crossval) # for cross validation
-library(MASS) # for LDA and QDA
+library(klaR) # general functions for classification
 library(sda) # LDA with special shrinkage method
+library(crossval) # for cross validation
 ```
 
 Let's load the data.
@@ -690,45 +691,443 @@ train$isMaster <- train$Title == "Master"
 
 
 
-***
-
-
-
 
 
 ## Missing Values
 
-+ *Fare*: 1 $NA$ in test, several 0's
-median for $NA$
+### Fare
 
-+ *Cabin*: many empty strings in test and train
-keep, empty strings
+There was 1 $NA$ for *Fare* in the test set.
+Since this is just 1 value I think it is reasonable to set it to the median.
 
-+ *Embarked*: 2 empty strings in train
-impute by price
+```{r, results='hide'}
+test[is.na(Fare), Fare := median(c(test$Fare, train$Fare), na.rm = TRUE)]
+```
 
-```{r}
-train[Embarked == "", Fare]
+### Embarked
+
+In the train set there were 2 empty strings.
+I saw many people label it with *C* because of the high fare (80) of these
+passanger tickets.
+Below is a violin plot that shows *Fare* densities for the *Embarked* variable.
+
+```{r, warning=FALSE}
 ggplot(train[!Embarked == ""], aes(x = Embarked, y = Fare)) +
   geom_violin(fill = "gray") +
   geom_boxplot(alpha = .5, varwidth = TRUE) +
   geom_hline(yintercept = 80, color = "red", linetype = 2) +
   scale_y_continuous(trans = "log10") +
   theme_classic()
-
 ```
 
-
-
-+ *Age*: many $NA$ in test and train
+The y-axis is log transformed to see the spread of *Fare* better.
+The red line is drawn for $Fare = 80$.
+Clearly, it seems unlikely that the passangers embarked in *Q*.
+*C* seems slightly more likely than *S* according to the densities.
+However, you can also see the prior probabilities of *Embarked*.
+With `varwidth = TRUE` the boxplot widths are proportional to the square roots 
+of the groups counts.
 
 ```{r}
-imp <- mice(train[, .(Age, Pclass, Sex, lFare, Parch, SibSp, nCabins)], 
-            seed = 42)
-imp
-xyplot(imp, Age ~ lFare | .imp)
-
-head(complete(imp))
+prop.table(table(as.character(train[!Embarked == "", Embarked])))
 ```
+
+Taking this into account I would rather set these two values to *S*
+
+```{r, results='hide'}
+train[Embarked == "", Embarked := "S"]
+```
+
+### Age
+
+There were many $NA$s in *Age* and probably this is an important variable.
+At least it is important to know whether or not a passanger was a child.
+In other kernels I saw people using the `mice` package.
+I didn't know this one before but it is also recommended in several forums.
+
+It does multiple imputations using chained equations.
+I'm not so familiar with imputation but there are two general ways to do 
+imputation.
+One is to impute variables one at a time. 
+The other (Joint Modeling) is do impute these variables simultaneously.
+This package does the former one.
+As the name says it does this multiple times (by default 5 times).
+This assures that the uncertainty of the data that is imputed is kept.
+
+We will do this using a subset of useful variables.
+We will also use both datasets for the imputation.
+
+```{r, results='hide', message=FALSE}
+full <- rbind(
+  train[, .(Age, Pclass, Sex, lFare, Parch, SibSp)],
+  test[, .(Age, Pclass, Sex, lFare = log(Fare + 1), Parch, SibSp)]
+)
+imp <- mice(full, seed = 42)
+```
+```{r}
+imp
+```
+
+The summary tells us that 263 values for *Age* were imputed from *Pclass*, 
+*Sex*, *lFare*, *Parch*, and *SibSp*.
+The method used was predictive mean matching.
+5 datasets have been created.
+The plot below shows these datasets.
+Blue values in all plots are identical, the red ones were the imputed ones.
+The imputed points visibly resemble the distribution of the real points.
+
+```{r}
+xyplot(imp, Age ~ lFare | .imp)
+```
+
+The idea of the package is to continue fitting the model on all 5 
+datasets and then pooling the results back together.
+I will only use the imputed values of 1 dataset though.
+
+```{r}
+impAge <- complete(imp)$Age
+```
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+# Modeling
+
+In this section I will create the input matrix ($X$) and fit different models
+to it.
+To estimate the prediction error of these models I will use cross validation.
+The best Model will ultimately be chosen for the prediction.
+
+
+
+## Create Input Matrix
+
+First, I need to create the input matrix.
+I will call it $X$ as in $Y = f(X) + \epsilon$, where $f$ is the model
+$\epsilon$ is the bayes rate, $X$ is the input and $Y$ the output
+matrix.
+The input matrix has the form $N \times p$ with $N$ rows (the observations)
+and $p$ columns (the features or predictor variables).
+$Y$ is a class indicator matrix of $N \times 1$ where $0$ indicates 
+*non-survivor* and $1$ indicates *survivor*
+
+In the previous section I carelessly created new features.
+The assumptions that I made were based on complete data.
+Then, I used imputation to replace missing values.
+Now, I have to do the feature extraction again in a proper way.
+It should include imputed data and it should be aplicable on the test and 
+train set.
+I will write a function for this.
+The function should take the datasets and return a ready-to-use numeric 
+input matrix.
+For categorical features I have to create dummy variables.
+
+```{r}
+MakeX <- function(train, test, 
+                  naFare = 80, naEmbarked = "S", naAge = impAge) {
+  # combine datasets
+  keepCols <- c("PassengerId", "Pclass", "Name", "Sex", "Age", "SibSp", 
+                "Parch", "Ticket", "Fare", "Cabin", "Embarked")
+  train <- train[, keepCols, with = FALSE]
+  test <- test[, keepCols, with = FALSE]
+  full <- rbind(train, test)
+  
+  # impute missing values
+  full[is.na(Fare), Fare := naFare]
+  full[Embarked == "", Embarked := naEmbarked]
+  full[, Age := impAge]
+  
+  # extract features from Names
+  titles <- gsub('(.*, )|(\\..*)', '', full$Name)
+  surnames <- vapply(
+    full$Name, 
+    function(x) strsplit(x, "[,. ]")[[1]][1],
+    character(1)
+  )
+  full$isMaster <- titles == "Master"
+  counts <- table(surnames)
+  full$SNCount <- vapply(
+    surnames, 
+    function(sn) counts[names(counts) == sn],
+    integer(1)
+  )
+  
+  # extract features from Age
+  full$isU14 <- full$Age < 14
+  
+  # dummy for sex
+  full$isMale <- full$Sex == "male"
+  
+  # extract Family features
+  full$FMembers <- full$SibSp + full$Parch + 1
+  full$SibSpIs1 <- full$SibSp == 1
+  full$ParchIs1 <- full$Parch == 1
+  full$smallFamily <- full$FMembers > 1 & full$FMembers < 5
+  full$SNCountIs2 <- full$SNCount == 2
+  
+  # transform Fare
+  full$lFare <- log10(full$Fare + 1)
+  
+  # extract Ticket feature
+  txt <- toupper(gsub("[0-9\\. /]", "", full$Ticket))
+  full$isPC <- txt %in% c("PC", "PPP", "PP")
+  
+  # extract Cabin features
+  full$Deck <- vapply(
+    full$Cabin, 
+    function(x) strsplit(x, "")[[1]][1],
+    character(1)
+  )
+  full[is.na(Deck), Deck := ""]
+  full$noDeck <- full$Deck == ""
+  full$nCabins <- vapply(
+    full$Cabin, 
+    function(x) length(strsplit(x, " ")[[1]]),
+    integer(1)
+  )
+  full$hasCabin <- full$nCabins > 0
+  
+  # extract Embarked features
+  full$fromC <- full$Embarked == "C"
+  full$fromQ <- full$Embarked == "Q"
+  
+  # make X
+  keepCols <- c("Pclass", "isMale", "Age", "isU14", "SibSp", "SibSpIs1",
+                "Parch", "ParchIs1", "FMembers", "smallFamily", "SNCount",
+                "SNCountIs2", "isPC", "Fare", "lFare", "nCabins", "hasCabin",
+                "noDeck", "fromC", "fromQ")
+  l <- lapply(keepCols, function(colName) { as.integer(full[[colName]]) })
+  X <- do.call(cbind, l)
+  rownames(X) <- full$PassengerId
+  colnames(X) <- keepCols
+  
+  return(X)
+}
+```
+
+With this I create X and split it into test and training again.
+
+```{r}
+X <- MakeX(train, test)
+Xtrain <- X[1:nrow(train), ]
+Xtest <- X[-(1:nrow(train)), ]
+Ytrain <- as.integer(as.character(train$Survived))
+```
+
+## LDA
+
+A linear discriminant analysis wants to see the data points of each class
+as a multivariate Gauss cloud.
+It wants to maximize the distances between the clouds' centroids 
+with respect to their spreads.
+In a regular LDA it is assumed that the covariance matrices of all classes
+are the same.
+So, for estimating the covariance matrix, all data points are pooled.
+With this assumption separating hyperplanes between classes are always linear.
+
+To get an idea what the LDA *sees* we can plot the class distributions along the
+1st discriminant coordinate.
+For 2 classes this is orthogonal of the separating hyperplane.
+As you can see below, there is a big overlap.
+We can exppect a high error rate.
+
+```{r}
+fit <- lda(Xtrain, Ytrain)
+plot(fit)
+```
+
+The warning about colinear variables was something I mentioned during data
+preparation.
+A variable that is colinear to another variable does not bring a lot of new 
+information.
+But it brings a lot of variance because its coefficient estimates are unstable.
+That's why it makes sense to kick out some variables --
+introducing bias and reducing variance.
+
+The function below does a forward feature selection.
+A model is built stepwise by starting at only an intercept and successivly 
+adding a variable.
+Variable selection is done by minimizing the error rate, which is in turn
+estimated by 10-fold cross validation.
+This method is nested and greedy.
+I set `improvement = -1` so it will not stop until it included all variables.
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+stepsLDA <- stepclass(Xtrain, grouping = Ytrain, 
+                   improvement = -1, method = "lda", direction = "forward")
+plot(1 - stepsLDA$process$result.pm, type = "b", pch = 20,
+     ylab = "error rate", main = "LDA")
+```
+
+According to this method there are at least 5 features which I should include 
+and at least 5 features which I should not include.
+The feature combination with the lowest error rate is...
+
+```{r}
+idx <- which.max(stepsLDA$process$result.pm)
+(featsLDA <- as.character(stepsLDA$process$varname[1:idx]))
+```
+
+## QDA
+
+The assumption that classes share the same covariance matrix is sometimes
+too strict.
+If we estimate a covariance matrix for each class, we get a quadratic 
+separating hyperplane -- a QDA.
+Now more parameters have to be estimated.
+
+I will do a forward selection again, but this time I set `improvement = 0` to
+stop as soon as the error rate goes up again.
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+stepsQDA <- stepclass(Xtrain, grouping = Ytrain, 
+                   improvement = 0, method = "qda", direction = "forward")
+plot(1 - stepsQDA$process$result.pm, type = "b", pch = 20,
+     ylab = "error rate", main = "RDA")
+idx <- which.max(stepsQDA$process$result.pm)
+(featsQDA <- as.character(stepsQDA$process$varname[1:idx]))
+```
+
+## RDA
+
+There is a middle ground between QDA and LDA which is a regularized discriminant
+analysis.
+Here you have 2 slide controls.
+One parameter adjusts how much of a shared and how much of separate covariance
+matrices are used.
+Another parameter adjusts to what degree the whole covariance matrix or just
+its diagonal is used.
+This method should be more robust to colinearity.
+
+To estimate the best parameter combination RDA also uses cross validation.
+Here, I set `fold = 3` to make the whole process a bit faster.
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+stepsRDA <- stepclass(Xtrain, grouping = Ytrain, 
+                   improvement = 0, method = "rda", direction = "forward",
+                   fold = 3)
+plot(1 - stepsRDA$process$result.pm, type = "b", pch = 20,
+     ylab = "error rate", main = "SDA")
+idx <- which.max(stepsRDA$process$result.pm)
+(featsRDA <- as.character(stepsRDA$process$varname[1:idx]))
+```
+
+
+## SDA
+
+The last one is a bit more fancy.
+It is called shrinkage discriminant analysis.
+This is also a regularized linear discriminant analysis but the regularization
+method uses several James-Stein type estimators.
+This method was actually designed for high dimensionality problems, when
+you have $p \gg N$.
+It also has a feature ranking functionality but I won't use that here.
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+stepsSDA <- stepclass(Xtrain, grouping = Ytrain,
+                      improvement = 0, method = "sda", direction = "forward",
+                      verbose = FALSE)
+plot(1 - stepsSDA$process$result.pm, type = "b", pch = 20,
+     ylab = "error rate", main = "SDA")
+idx <- which.max(stepsSDA$process$result.pm)
+(featsSDA <- as.character(stepsSDA$process$varname[1:idx]))
+```
+
+
+
+## Evaluation
+
+```{r}
+CV <- list()
+```
+
+I will do a final cross validation to estimate the Accuracy of each model
+and its standard error.
+I will use the `crossval` function for this.
+It takes care of keeping class proportions when splitting data.
+By default this repeats a 10-fold cross validation 20 times.
+
+```{r}
+# LDA
+predLDA <- function(trainX, trainY, testX, testY) {
+  fit <- lda(trainX, grouping = trainY)
+  pred <- predict(fit, newdata = testX)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
+X <- Xtrain[, colnames(Xtrain) %in% featsLDA[-1]]
+CV$LDA <- crossval(predLDA, X, Ytrain, verbose = FALSE)
+
+# QDA
+predQDA <- function(trainX, trainY, testX, testY) {
+  fit <- qda(trainX, grouping = trainY)
+  pred <- predict(fit, newdata = testX)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
+X <- Xtrain[, colnames(Xtrain) %in% featsQDA[-1]]
+CV$QDA <- crossval(predQDA, X, Ytrain, verbose = FALSE)
+```
+
+I will reduce the folds and number of repeats for the RDA because it
+would take to long otherwise (it also uses a cross validation in the
+fitting process).
+
+```{r}
+# RDA
+predRDA <- function(trainX, trainY, testX, testY) {
+  fit <- rda(trainX, grouping = trainY, fold = 3)
+  pred <- predict(fit, newdata = testX)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
+X <- Xtrain[, colnames(Xtrain) %in% featsRDA[-1]]
+CV$RDA <- crossval(predRDA, X, Ytrain, verbose = FALSE, K = 5, B = 10)
+
+# SDA
+predSDA <- function(trainX, trainY, testX, testY) {
+  fit <- sda(trainX, L = trainY, verbose = FALSE)
+  pred <- predict(fit, Xtest = testX, verbose = FALSE)$class
+  acc <- sum(pred == testY) / length(pred)
+  return(acc)
+}
+X <- Xtrain[, colnames(Xtrain) %in% featsSDA[-1]]
+CV$SDA <- crossval(predSDA, X, Ytrain, verbose = FALSE)
+```
+
+The plot below summarizes the results.
+*QDA* wins with more than 82% predicted accuracy.
+This model will be chosen for the final prediction.
+
+```{r}
+l <- lapply(CV, function(i) { data.frame(Acc = i$stat, se = i$stat.se) })
+res <- do.call(rbind, l)
+res$Model <- rownames(res)
+ggplot(res, aes(x = Model, y = Acc)) +
+  geom_point() +
+  geom_errorbar(aes(ymax = Acc + se, ymin = Acc - se)) +
+  coord_flip() +
+  theme_classic()
+```
+
 
 
