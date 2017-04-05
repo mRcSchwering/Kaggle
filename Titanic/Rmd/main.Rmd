@@ -19,7 +19,7 @@ output:
 
 # Introduction
 
-This is my first Kaggle script so don't go too hard on me.
+This is my first Kaggle script so if you see any mistakes, please comment.
 I used some machine learning in the past but only to solve biological problems,
 so this is new.
 
@@ -37,11 +37,10 @@ It might happen that I go back and forth bewteen consecutive steps.
 
 **Linear Discriminant Analysis**
 
-I have looked into some scripts for the Titanic set.
-A lot of people use random forest predictors.
-I have seen nobody using linear discriminant analysis (LDA) yet which would be
-my first thought.
-In the modelling part I will try out a LDA and some of its cousins.
+Many kernels use logistic regression or random forests as model class.
+I have not seen someone try out a linear discriminant analysis (LDA) yet.
+Therefore, this kernel will try to make a prediction using LDA 
+(and its relatives).
 
 **Loading Data**
 
@@ -68,6 +67,8 @@ str(test)
 ```
 
 Some classes should be adjusted.
+(This is the only time I am talking about the data structure.
+From now on *class* means *survivor* or *non-survivor*)
 
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 train[, Name := as.character(Name)]
@@ -152,7 +153,7 @@ train[Fare == 0, ]
 test[Fare == 0, ]
 ```
 
-The cases with `Fare == 0` also have a lot of missing values for *Age*.
+The cases with $Fare = 0$ also have a lot of missing values for *Age*.
 I wonder whether `0` also denotes to a missing value for *Fare*.
 
 ### Cabin
@@ -171,7 +172,6 @@ Most are empty.
 
 ```{r}
 table(train$Embarked)
-table(test$Embarked)
 train[Embarked == "", ]
 ```
 
@@ -263,7 +263,7 @@ table(train$SNCount)
 
 One important factor for survival is definitely the age.
 As far as I know women and children were the first to board the rescue boats.
-So, there should be a natural separation in the *Age* feature at 18.
+So, there should be a natural separation at age of 18.
 I will extract this as a binary feature.
 
 ```{r}
@@ -373,18 +373,15 @@ models.
 It is known how these behave to certain data structures.
 Highly correlated features for example can produce unstable coefficient
 estimates.
-Or differing covariance matrices among target classes (i.e. *survived*, 
-*not survived*) violate the shared covariance assumption of the regular
-LDA.
 In general I will explore different combination of features in the **Modeling**
 section anyway. 
-But it is good to know the features in order to explain why certain model 
+But it is good to know the features in order to explain why certain models 
 perform better than others.
 
 Another thing is, that I might need to adjust some features.
 A regular LDA for example assumes Gauss distributed features.
 So, sometimes it makes sense to use transformations of a feature instead of
-the raw feature (i.e. *basis expansion*).
+the raw feature.
 
 Again, this is not a straight forward process.
 I might extract some more features along the way.
@@ -442,12 +439,11 @@ The remaining feature pairs do not show high correlations.
 ### Age
 
 Let's see if the age has a substantial effect on survival chances.
-
-I will plot densities for such comparisons.
-They integrate to 1 which means I can nicely compare distributions of
-2 features with different total counts.
+Densities are good for such comparisons.
+They integrate to 1 which means distributions of
+2 features with different total counts can nicely be compared.
 Second, they use a kernel for local smoothing.
-This way I only see the local trend.
+This way only the local trend is visible.
 
 ```{r, warning=FALSE}
 ggplot(train, aes(x = Age, fill = Survived)) +
@@ -461,8 +457,9 @@ This is probably because children boarded first.
 
 However, from this plot I can't say whether this separation is really at the 
 age of 18.
-I can look at the proportions of survivors and non-survivors in 2 age groups
-when setting the separation at different ages.
+The proportion difference of survivors and non-survivors in 2 age groups
+might be a useful indicator.
+I will look at these proportions while adjusting the separation age.
 
 ```{r}
 dt <- train[!is.na(train$Age), 
@@ -485,7 +482,7 @@ ggplot(dt, aes(x = Distinction, y = Proportion, fill = Proportion)) +
 ```
 
 According to this plot, 18 would not be a good age to group children and adults.
-I should rather use age 14.
+Groups should be divided at the age of 14.
 
 ```{r}
 train$isU14 <- train$Age < 14
@@ -514,14 +511,14 @@ ggplot(train, aes(x = SibSp, fill = Survived)) +
 
 Both classes (*survivor*/ *non-survivor*) show similar trends but the 
 proportions seem to differ.
-This is easier to see if I use a mosaic plot.
+This is easier to see in a mosaic plot.
 
 ```{r}
 mosaicplot(table(train[, .(SibSp, Survived)]), shade = TRUE)
 ```
 
 It seems that large families in general had lower survival chances.
-Passangers with 1 spouse/sibling had the highest survival chances.
+Passengers with 1 spouse/sibling had the highest survival chances.
 But then people with zero spouses/sibling had lower survival chances 
 again.
 
@@ -529,19 +526,10 @@ Maybe families in general had higher survival chances because there were
 children involved.
 But then for the larger families it was harder to get every one together in the
 chaos and that's why they again have lower survival chances.
-(My theory for this...)
+(my theory for this...)
 
-A linear separator would not be able to distinguish drop at 0 again.
-I could engineer a metric like this:
-
-```{r}
-f <- function(x) { (1 - x)^2 }
-mosaicplot(table(f(train$SibSp), train$Survived), shade = TRUE)
-```
-
-However, I have weirdly high values now.
-Knowing that this affects the LDA fit a lot, I rather create a binary feature
-to only capture $SibSp = 1$.
+A linear separator would not be able to distinguish this drop at 0 again.
+Therefore, I create a binary feature to only capture the $SibSp = 1$ cases.
 
 ```{r}
 train$SibSpIs1 <- train$SibSp == 1
@@ -551,8 +539,8 @@ mosaicplot(table(train[, .(SibSpIs1, Survived)]), shade = TRUE)
 
 **Parch, FMembers, SNCount**
 
-To make it short: I have seen similar trends in the family related features.
-I always extracted the cases with highest survival rate as a binary feature.
+To make it short: There are similar trends in the family related features.
+I always extract the cases with highest survival rate as a binary feature.
 
 ```{r}
 train$ParchIs1 <- train$Parch == 1
@@ -572,7 +560,7 @@ ggplot(train, aes(x = Fare, fill = Survived)) +
   theme_classic()
 ```
 
-It looks like survival chances were higher if you had an expensive ticket.
+It looks like survival chances were higher with a more expensive ticket.
 The capitalism is strong with this one.
 
 ```{r}
@@ -650,6 +638,7 @@ mosaicplot(table(train[, .(Title, Survived)]), shade = TRUE)
 Well, needless to say the female titles had higher survival chances.
 The interesting thing here is that *Master* and *Rare Title* have different 
 survival chances than *Mr*.
+Ok *Rare Title* also includes females, but *Master* is a male-only title.
 
 ```{r}
 mosaicplot(table(train[Title %in% c("Rare Title", "Mr", "Master"), 
@@ -681,7 +670,7 @@ train$isMaster <- train$Title == "Master"
 + Families as represented by *SibSp*, *Parch*, *FMembers*, *SNCount*: large
   families have lower survival chances
 + *Fare*: higher fares have higher survival chances
-+ *Pclass*: higher passanger classes have higher survival chances
++ *Pclass*: higher passenger classes have higher survival chances
 + *isPC*: $TicketText = PC$ means higher survival chances
 + *hasCabin*: having no cabin means lower survival chances
 + *fromC*: people from Cherbourg had higher survival chances
@@ -708,7 +697,7 @@ test[is.na(Fare), Fare := median(c(test$Fare, train$Fare), na.rm = TRUE)]
 
 In the train set there were 2 empty strings.
 I saw many people label it with *C* because of the high fare (80) of these
-passanger tickets.
+passenger tickets.
 Below is a violin plot that shows *Fare* densities for the *Embarked* variable.
 
 ```{r, warning=FALSE}
@@ -722,7 +711,7 @@ ggplot(train[!Embarked == ""], aes(x = Embarked, y = Fare)) +
 
 The y-axis is log transformed to see the spread of *Fare* better.
 The red line is drawn for $Fare = 80$.
-Clearly, it seems unlikely that the passangers embarked in *Q*.
+Clearly, it seems unlikely that the passengers embarked in *Q*.
 *C* seems slightly more likely than *S* according to the densities.
 However, you can also see the prior probabilities of *Embarked*.
 With `varwidth = TRUE` the boxplot widths are proportional to the square roots 
@@ -741,21 +730,19 @@ train[Embarked == "", Embarked := "S"]
 ### Age
 
 There were many $NA$s in *Age* and probably this is an important variable.
-At least it is important to know whether or not a passanger was a child.
+At least it is important to know whether or not a passenger was a child.
 In other kernels I saw people using the `mice` package.
-I didn't know this one before but it is also recommended in several forums.
+I didn't know this one before but it sounds quite powerful.
 
 It does multiple imputations using chained equations.
 I'm not so familiar with imputation but there are two general ways to do 
 imputation.
 One is to impute variables one at a time. 
 The other (Joint Modeling) is do impute these variables simultaneously.
-This package does the former one.
+This package does the first one.
 As the name says it does this multiple times (by default 5 times).
 This assures that the uncertainty of the data that is imputed is kept.
-
-We will do this using a subset of useful variables.
-We will also use both datasets for the imputation.
+For the imputation, a set of seamingly useful variables can be defined.
 
 ```{r, results='hide', message=FALSE}
 full <- rbind(
@@ -781,8 +768,8 @@ xyplot(imp, Age ~ lFare | .imp)
 ```
 
 The idea of the package is to continue fitting the model on all 5 
-datasets and then pooling the results back together.
-I will only use the imputed values of 1 dataset though.
+datasets and then pool the results back together.
+Here, I will only use the imputed values of 1 dataset though.
 
 ```{r}
 impAge <- complete(imp)$Age
@@ -814,7 +801,7 @@ impAge <- complete(imp)$Age
 
 In this section I will create the input matrix ($X$) and fit different models
 to it.
-To estimate the prediction error of these models I will use cross validation.
+To estimate the prediction error of these models cross validation is used.
 The best Model will ultimately be chosen for the prediction.
 
 
@@ -872,6 +859,7 @@ MakeX <- function(train, test,
   
   # extract features from Age
   full$isU14 <- full$Age < 14
+  full$isU18 <- full$Age < 18
   
   # dummy for sex
   full$isMale <- full$Sex == "male"
@@ -923,7 +911,7 @@ MakeX <- function(train, test,
 }
 ```
 
-With this I create X and split it into test and training again.
+With this I create X and split it back into test and training again.
 
 ```{r}
 X <- MakeX(train, test)
@@ -1133,8 +1121,7 @@ It takes care of preserving class proportions when splitting data.
 
 By default this repeats a 10-fold cross validation 20 times.
 To reduce time, I set it to 3-fold and 5 times.
-Because RDA takes especially long it will only get 3 repetitions.
-Nevertheless, the following functions can take some minutes.
+The following functions can take some minutes.
 (Be warned, I can't make `sda` shut up!)
 
 ```{r, warning=FALSE, results='hide', message=FALSE}
@@ -1147,16 +1134,20 @@ CV$QDA <- crossval(predQDA, Xtrain, Ytrain,
                    verbose = FALSE, K = 3, B = 5)
 
 # RDA
-CV$RDA <- crossval(predRDA, Xtrain, Ytrain, 
-                   verbose = FALSE, K = 3, B = 3)
+#CV$RDA <- crossval(predRDA, Xtrain, Ytrain, 
+#                   verbose = FALSE, K = 3, B = 5)
 
 # QDA
 CV$SDA <- crossval(predSDA, Xtrain, Ytrain, 
                    verbose = FALSE, K = 3, B = 5)
 ```
 
+I commented *RDA* out because it takes to long to run on Kaggle.
+(Didn't know this before)
+It was not the method with the best accuracy so no problem.
+
 The plot below summarizes the results.
-*QDA* is slightly better than *RDA* with more than 81% predicted accuracy.
+*QDA* wins with more than 81% predicted accuracy.
 This method will be chosen for the final prediction.
 
 ```{r, fig.width=8}
@@ -1170,5 +1161,96 @@ ggplot(res, aes(x = Model, y = Acc)) +
   theme_classic()
 ```
 
+  
+  
+  
+  
+
+
+  
+***
+
+
+
+
+
+
+
+
+
+
+
+# Prediction
+
+## Final Model
+
+We estimated that the *QDA* procedure with forward feature selection gives 
+the best prediction accuracy.
+Now this is applied on the whole training set.
+
+```{r}
+# estimate best feature combination with CV
+steps <- stepclass(
+  Xtrain, grouping = Ytrain, 
+  improvement = 0, method = "qda", direction = "forward",
+  fold = 5, output = FALSE
+)
+
+# fit model with selected features
+idx <- which.max(steps$process$result.pm)
+feats <- as.character(steps$process$varname[1:idx])
+redXtrain <- Xtrain[, colnames(Xtrain) %in% feats[-1]]
+fit <- qda(redXtrain, grouping = Ytrain)
+```
+
+We can look at the final model.
+There is a prior of roughly 60% non-survivors to 40% survivors.
+From the group means table you can see which features are used.
+
+```{r}
+fit
+```
+
+## Predict Test Set
+
+Now the model is finally used on the test dataset.
+
+```{r}
+redXtest <- Xtest[, colnames(Xtest) %in% feats[-1]]
+pred <- predict(fit, newdata = redXtest)
+```
+
+The posterior probability distribution is shown below.
+For each passenger the class with the highest probability is chosen.
+As you can see the model is quite sure about its decision.
+There are no cases near 0.5.
+
+```{r}
+df <- data.frame(
+  Prob = c(pred$posterior[, 1], pred$posterior[, 2]),
+  Class = rep(c("Non-Survivor", "Survivor"), each = nrow(pred$posterior))
+)
+ggplot(df, aes(x = Prob)) +
+  geom_histogram(bins = 20) +
+  facet_grid(Class ~ .) +
+  theme_bw()
+```
+
+These are the predictions...
+
+```{r}
+df <- data.frame(
+  PassengerId = rownames(pred$posterior),
+  Survived = pred$class
+)
+write.csv(df, file = "QDA_submission.csv", row.names = FALSE, quote = FALSE)
+table(df$Survived)
+```
+
+That's it!
+Thanks for reading through this whole thing.
+If you have any suggestions, comments are welcome.
+
+***
 
 
