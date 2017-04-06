@@ -1,0 +1,344 @@
+---
+title: "Housing Cri.. Prices"
+subtitle: "Data Exploration"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+---
+
+
+
+
+
+
+
+# Introduction
+
+
+
+**Loading Data**
+
+The following libraries will be used.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(data.table) # database-like tables
+library(ggplot2) # general plots
+library(corrplot) # corr SPLOMs
+library(vcd) # stats for categories
+library(mice) # for imputation
+```
+
+Input is loaded and covnerted to `data.table`.
+
+```{r}
+test <- read.csv("../input/test.csv")
+train <- read.csv("../input/train.csv")
+test <- data.table(test)
+train <- data.table(train)
+```
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+# Data Quality
+
+The number of dimensions and density of the input matrix is calculated.
+
+```{r}
+(N <- nrow(train))
+(p <- ncol(train) - 2)
+N^(1/p)
+```
+
+## Variable Types
+
+From the *data_description* variable types can be defined.
+There are 4 categories: *nominal*, *ordinal*, *discrete*, *continuous*.
+
+```{r}
+nomVars <- c("MSZoning", "Street", "Alley", "LandContour", "LotConfig",
+             "Neighborhood", "Condition1", "Condition2", "HouseStyle",
+             "RoofStyle", "RoofMatl", "Exterior1st", "Exterior2nd",
+             "MasVnrType", "Foundation", "Heating", "CentralAir", "Electrical",
+             "GarageType", "PavedDrive", "MiscFeature", "SaleType",
+             "SaleCondition")
+ordVars <- c("MSSubClass", "LotShape", "Utilities", "LandSlope", "BldgType",
+             "OverallQual", "OverallCond", "ExterQual", "ExterCond", "BsmtQual",
+             "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2",
+             "HeatingQC", "KitchenQual", "Functional", "FireplaceQu",
+             "GarageFinish", "GarageQual", "GarageCond", "PoolQC", "Fence",
+             "MoSold")
+discVars <- c("YearBuilt", "YearRemodAdd", "BsmtFullBath", "BsmtHalfBath",
+              "FullBath", "HalfBath", "BedroomAbvGr", "KitchenAbvGr",
+              "TotRmsAbvGrd", "Fireplaces", "GarageYrBlt", "GarageCars",
+              "YrSold")
+contVars <- c("LotArea", "MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF",
+              "TotalBsmtSF", "X1stFlrSF", "X2ndFlrSF", "LowQualFinSF",
+              "GrLivArea", "GarageArea", "WoodDeckSF", "OpenPorchSF",
+              "EnclosedPorch", "X3SsnPorch", "ScreenPorch", "PoolArea",
+              "MiscVal", "LotFrontage")
+```
+
+## Special Values
+
+According to *data_description* several $NA$ have a special meaning.
+These values are replaced with more descriptive `chr` strings.
+
+```{r, results='hide', message=FALSE}
+train[is.na(Alley), Alley := "noAccess"]
+test[is.na(Alley), Alley := "noAccess"]
+train[is.na(BsmtQual), BsmtQual := "noBasement"]
+train[is.na(BsmtCond), BsmtCond := "noBasement"]
+train[is.na(BsmtExposure), BsmtExposure := "noBasement"]
+train[is.na(BsmtFinType1), BsmtFinType1 := "noBasement"]
+train[is.na(BsmtFinType2), BsmtFinType2 := "noBasement"]
+test[is.na(BsmtQual), BsmtQual := "noBasement"]
+test[is.na(BsmtCond), BsmtCond := "noBasement"]
+test[is.na(BsmtExposure), BsmtExposure := "noBasement"]
+test[is.na(BsmtFinType1), BsmtFinType1 := "noBasement"]
+test[is.na(BsmtFinType2), BsmtFinType2 := "noBasement"]
+train[is.na(FireplaceQu), FireplaceQu := "noFireplace"]
+test[is.na(FireplaceQu), FireplaceQu := "noFireplace"]
+train[is.na(GarageType), GarageType := "noGarage"]
+train[is.na(GarageFinish), GarageFinish := "noGarage"]
+train[is.na(GarageQual), GarageQual := "noGarage"]
+train[is.na(GarageCond), GarageCond := "noGarage"]
+test[is.na(GarageType), GarageType := "noGarage"]
+test[is.na(GarageFinish), GarageFinish := "noGarage"]
+test[is.na(GarageQual), GarageQual := "noGarage"]
+test[is.na(GarageCond), GarageCond := "noGarage"]
+train[is.na(PoolQC) , PoolQC := "noPool"]
+test[is.na(PoolQC) , PoolQC := "noPool"]
+train[is.na(Fence), Fence := "noFence"]
+test[is.na(Fence), Fence := "noFence"]
+train[is.na(MiscFeature), MiscFeature := "none"]
+test[is.na(MiscFeature), MiscFeature := "none"]
+```
+
+Nominal and ordinal variables are converted to `factor`,
+continuous and discrete to `numeric` and `integer` respectively.
+
+```{r}
+for (j in colnames(train)) {
+  if (j %in% nomVars || j %in% ordVars) {
+    train[[j]] <- as.factor(train[[j]])
+    test[[j]] <- as.factor(test[[j]])
+  } else if (j %in% discVars) {
+    train[[j]] <- as.integer(train[[j]])
+    test[[j]] <- as.integer(test[[j]])
+  } else if (j %in% contVars) {
+    train[[j]] <- as.numeric(train[[j]])
+    test[[j]] <- as.numeric(test[[j]])
+  }
+}
+```
+
+## Ordering
+
+From *data_description* the order of ordinal variable classes can be derived.
+These orderings are defined, then the `levels` of their `factors` are adjusted.
+
+```{r}
+lvlOrd <- list(
+  LotShape = c("Reg", "IR1", "IR2", "IR3"),
+  Utilities = c("AllPub", "NoSewr", "NoSeWa", "ELO"),
+  LandSlope = c("Gtl", "Mod", "Sev"),
+  BldgType = c("1Fam", "2FmCon", "Duplx", "TwnhsE", "TwnhsI"),
+  OverallQual = 10:1,
+  OverallCond = 10:1,
+  ExterQual = c("Ex", "Gd", "TA", "Fa", "Po"),
+  ExterCond = c("Ex", "Gd", "TA", "Fa", "Po"),
+  BsmtQual = c("Ex", "Gd", "TA", "Fa", "Po", "noBasement"),
+  BsmtCond = c("Ex", "Gd", "TA", "Fa", "Po", "noBasement"),
+  BsmtExposure = c("Gd", "Av", "Mn", "No", "noBasement"),
+  BsmtFinType1 = c("GLQ", "ALQ", "BLQ", "Rec", "LwQ", "Unf", "noBasement"),
+  BsmtFinType2 = c("GLQ", "ALQ", "BLQ", "Rec", "LwQ", "Unf", "noBasement"),
+  HeatingQC = c("Ex", "Gd", "TA", "Fa", "Po"),
+  KitchenQual = c("Ex", "Gd", "TA", "Fa", "Po"),
+  Functional = c("Typ", "Min1", "Min2", "Mod", "Maj1", "Maj2", "Sev", "Sal"),
+  FireplaceQu = c("Ex", "Gd", "TA", "Fa", "Po", "noFireplace"),
+  GarageFinish = c("Fin", "RFn", "Unf", "noGarage"),
+  GarageQual = c("Ex", "Gd", "TA", "Fa", "Po", "noGarage"),
+  GarageCond = c("Ex", "Gd", "TA", "Fa", "Po", "noGarage"),
+  PoolQC = c("Ex", "Gd", "TA", "Fa", "noPool"),
+  Fence = c("GdPrv", "MnPrv", "GdWo", "MnWw", "noFence"),
+  MoSold = 1:12
+)
+for (j in names(lvlOrd)) {
+  train[[j]] <- factor(train[[j]], levels = lvlOrd[[j]])
+  test[[j]] <- factor(test[[j]], levels = lvlOrd[[j]])
+}
+```
+
+## Missing Data
+
+$NA$ which are left must be true missing data.
+The following table gives a complete summary of missing data.
+
+```{r}
+full <- rbind(train[, -ncol(train), with = FALSE], test)
+full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
+naFeats <- vapply(
+  colnames(full),
+  function(j) any(is.na(full[[j]])) || any(full[[j]] == ""),
+  logical(1)
+)
+md.pattern(full[, colnames(full)[naFeats], with = FALSE])
+```
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+# Feature Exploration
+
+
+## Continuous and Discrete Features
+
+### Correlatio between Features
+
+The Pearson Correlation Coefficient is calculated for all feature pairs
+where both features are discrete or continous.
+The results are shown as heatmap below.
+Rows and columns were hierarchically ordered (complete link).
+
+```{r, fig.width=10, fig.height=10}
+m <- cor(
+  train[, c(contVars, discVars), with = FALSE],
+  use = "complete.obs"
+)
+corrplot(m, method = "color", order = "hclust")
+```
+
+### Correlation to Target
+
+For all continuous and discrete features the pearson correlation coefficient
+to the target *SalePrice* is calculated.
+Results are ordered by correlation.
+The color labels the feature type, continuous or discrete.
+
+```{r, fig.width=10, fig.height=5}
+cors <- vapply(
+  c(contVars, discVars),
+  function(i) cor(train[[i]], train$SalePrice, use = "complete.obs"),
+  numeric(1)
+)
+df <- data.frame(
+  var = factor(c(contVars, discVars),
+               levels = c(contVars, discVars)[order(cors)]),
+  cor = cors,
+  type = rep(c("cont", "disc"), c(length(contVars), length(discVars)))
+)
+ggplot(df, aes(x = var, y = cor, fill = type)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("P Correl Coeff of Cont/Discr Features vs SalePrice")
+```
+
+
+
+
+
+
+
+
+## Categorical Features
+
+### Correlation between Features
+
+The Cramer's V is calculated for all feature pairs
+where both features are categories.
+The results are shown as heatmap below.
+Rows and columns were hierarchically ordered (complete link).
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+m <- as.matrix(train[, c(ordVars, nomVars), with = FALSE])
+m <- m[complete.cases(m), ]
+mCramer <- vapply(
+  seq_len(ncol(m)),
+  function(i) {
+    vapply(
+      seq_len(ncol(m)),
+      function(j) {
+        assocstats(table(m[, i], m[, j]))$cramer
+      },
+      numeric(1)
+    )
+  },
+  numeric(ncol(m))
+)
+colnames(mCramer) <- colnames(m)
+rownames(mCramer) <- colnames(m)
+corrplot(mCramer, method = "color", order = "hclust")
+```
+
+### Correlation to Target
+
+For all categorical features the Kruskal-Wallis $\chi^2$ statistic
+to the target *SalePrice* is calculated.
+Results are ordered by the $\chi^2$ value.
+The color labels the feature type, nominal or ordinal.
+
+```{r, fig.width=10, fig.height=5, warning=FALSE}
+kwX2 <- vapply(
+  c(ordVars, nomVars),
+  function(j) { kruskal.test(train$SalePrice, train[[j]])$statistic },
+  numeric(1)
+)
+df <- data.frame(
+  var = factor(c(ordVars, nomVars),
+               levels = c(ordVars, nomVars)[order(kwX2)]),
+  kwX2 = kwX2,
+  type = rep(c("ord", "nom"), c(length(ordVars), length(nomVars)))
+)
+ggplot(df, aes(x = var, y = kwX2, fill = type)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("KW-X^2 for Categories vs SalePrice")
+```
+
+
+
+
+
+
+
+***
+
+# Summary
