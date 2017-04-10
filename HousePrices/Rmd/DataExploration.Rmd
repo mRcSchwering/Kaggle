@@ -48,6 +48,8 @@ train <- data.table(train)
 
 
 
+
+
 ***
 
 
@@ -95,6 +97,19 @@ contVars <- c("LotArea", "MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF",
               "MiscVal", "LotFrontage")
 ```
 
+A table is created to store feature attributes.
+
+```{r}
+featAttr <- data.table(
+  name = colnames(test)[-1],
+  type = "nominal"
+)
+featAttr[name %in% ordVars, type := "ordinal"]
+featAttr[name %in% discVars, type := "discrete"]
+featAttr[name %in% contVars, type := "continuous"]
+```
+
+
 ## Special Values
 
 According to *data_description* several $NA$ have a special meaning.
@@ -135,17 +150,17 @@ Nominal and ordinal variables are converted to `factor`,
 continuous and discrete to `numeric` and `integer` respectively.
 
 ```{r}
-for (j in colnames(train)) {
-  if (j %in% nomVars || j %in% ordVars) {
-    train[[j]] <- as.factor(train[[j]])
-    test[[j]] <- as.factor(test[[j]])
-  } else if (j %in% discVars) {
-    train[[j]] <- as.integer(train[[j]])
-    test[[j]] <- as.integer(test[[j]])
-  } else if (j %in% contVars) {
-    train[[j]] <- as.numeric(train[[j]])
-    test[[j]] <- as.numeric(test[[j]])
-  }
+for (j in c(nomVars, ordVars)) {
+  train[[j]] <- as.factor(train[[j]])
+  test[[j]] <- as.factor(test[[j]])
+}
+for (j in discVars) {
+  train[[j]] <- as.integer(train[[j]])
+  test[[j]] <- as.integer(test[[j]])
+}
+for (j in contVars) {
+  train[[j]] <- as.numeric(train[[j]])
+  test[[j]] <- as.numeric(test[[j]])
 }
 ```
 
@@ -186,6 +201,40 @@ for (j in names(lvlOrd)) {
 }
 ```
 
+## Exclusion of Values
+
+In special cases certain features do not make sense
+(e.g. $PoolArea$ with $PoolQC = noPool$).
+This can be extracted from the *data_description*.
+
+```{r}
+MasVnrArea # gibts nur wenn MasVnrType := "None"
+BsmtFinSF1, BsmtFinSF2, BsmtUnfSF, TotalBsmtSF,
+BsmtFullBath, BsmtHalfBath # gibts nur bei BmstFinType1/2 := "noBasement"
+GarageCars, GarageArea, GarageYrBlt # gibts nur wenn GarageType := "noGarage"
+PoolArea # gibts nur wenn PoolQC != "noPool"
+MiscVal # gibts nur wenn MiscFeature != "none"
+```
+
+
+```{r}
+x <- full[, X2ndFlrSF]
+hist(x, breaks = 30)
+hist(log(x + 1), breaks = 30)
+hist(x^2, breaks = 30)
+hist(x^3, breaks = 30)
+```
+
+```{r}
+LotArea 
+```
+
+
+```{r}
+contVars
+```
+
+
 ## Missing Data
 
 $NA$ which are left must be true missing data.
@@ -202,6 +251,19 @@ naFeats <- vapply(
 md.pattern(full[, colnames(full)[naFeats], with = FALSE])
 ```
 
+The total number of missing values per feature will be saved.
+
+```{r}
+mdpat <- md.pattern(full[, -c(1, ncol(train)), with = FALSE])
+featAttr$missing <- mdpat[nrow(mdpat), -nrow(mdpat)]
+dt <- featAttr[missing > 0, ]
+dt$name <- factor(dt$name, levels = dt$name[order(dt$missing)])
+ggplot(dt, aes(x = name, y = missing, fill = type)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Features with Missing Values")
+```
 
 
 
@@ -229,12 +291,22 @@ md.pattern(full[, colnames(full)[naFeats], with = FALSE])
 
 ## Continuous and Discrete Features
 
+### Feature Distributions
+
+```{r}
+ggplot(full, aes(x = EnclosedPorch)) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(trans = "log10")
+```
+
+
 ### Correlatio between Features
 
 The Pearson Correlation Coefficient is calculated for all feature pairs
 where both features are discrete or continous.
 The results are shown as heatmap below.
-Rows and columns were hierarchically ordered (complete link).
+Using euclidean distance of the correlation matrix as a metric 
+rows and columns were hierarchically ordered (complete link).
 
 ```{r, fig.width=10, fig.height=10}
 m <- cor(
@@ -243,6 +315,26 @@ m <- cor(
 )
 corrplot(m, method = "color", order = "hclust")
 ```
+
+There seem to be some clusters.
+The dendrogram of this clustering is plotted again.
+
+```{r}
+corrClust <- hclust(dist(m))
+plot(corrClust)
+```
+
+2 clusters are visibly distinguishable.
+Then, several more clusters could be defined.
+Here, the tree is cut into 3 clusters.
+
+```{r}
+corrCut <- cutree(corrClust, 3)
+featAttr$cluster <- NA
+featAttr[match(names(corrCut), featAttr$name), cluster := as.numeric(corrCut)]
+table(corrCut)
+```
+
 
 ### Correlation to Target
 
