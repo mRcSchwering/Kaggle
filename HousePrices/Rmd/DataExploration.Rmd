@@ -7,8 +7,8 @@ output:
     number_sections: true
     toc: true
     toc_depth: 2
-    fig_width: 7
-    fig_height: 4.5
+    fig_width: 9
+    fig_height: 5
     theme: cosmo
 ---
 
@@ -201,39 +201,68 @@ for (j in names(lvlOrd)) {
 }
 ```
 
-## Exclusion of Values
+## Feature Dependencies
 
-In special cases certain features do not make sense
-(e.g. $PoolArea$ with $PoolQC = noPool$).
-This can be extracted from the *data_description*.
+Some features' values heavily depend on the value of another feature.
+For example the values of $BsmtUnfSF$, $TotalBsmtSF$ only make sense if
+features $BsmtCond$, $BsmtExposure$, $BsmtQual$ are not $noBasement$.
+This information is given in *data_description*.
 
-```{r}
-MasVnrArea # gibts nur wenn MasVnrType := "None"
-BsmtFinSF1, BsmtFinSF2, BsmtUnfSF, TotalBsmtSF,
-BsmtFullBath, BsmtHalfBath # gibts nur bei BmstFinType1/2 := "noBasement"
-GarageCars, GarageArea, GarageYrBlt # gibts nur wenn GarageType := "noGarage"
-PoolArea # gibts nur wenn PoolQC != "noPool"
-MiscVal # gibts nur wenn MiscFeature != "none"
-```
-
-
-```{r}
-x <- full[, X2ndFlrSF]
-hist(x, breaks = 30)
-hist(log(x + 1), breaks = 30)
-hist(x^2, breaks = 30)
-hist(x^3, breaks = 30)
-```
+$$
+\begin{aligned}
+BsmtUnfSF, TotalBsmtSF : BsmtCond, BsmtExposure, BsmtQual \ne noBasement\\
+BsmtFinSF1 : BsmtFinType1 \ne noBasement\\
+BsmtFinSF2 : BsmtFinType2 \ne noBasement \\
+GarageYrBlt, GarageCars, GarageArea: GarageType, GarageFinish, GarageQual, GarageCond \ne noGarage \\
+PoolArea : PoolQC \ne noPool \\
+MiscVal : MiscFeature \ne none \\
+MasVnrArea : MasVnrType \ne none
+\end{aligned}
+$$
+For the garage and basement features there are several features which indicate
+the absence of that feature.
+If one of them indicates the absence of a feature, the others should too.
 
 ```{r}
-LotArea 
+full <- rbind(train[, -ncol(train), with = FALSE], test)
+full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
+setdiff(which(full$BsmtCond == "noBasement"),
+          which(full$BsmtExposure == "noBasement"))
+setdiff(which(full$BsmtCond == "noBasement"),
+          which(full$BsmtQual == "noBasement"))
+full[c(2041, 2186, 2525), .(Id, BsmtCond, BsmtExposure, BsmtQual, 
+                            BsmtUnfSF, TotalBsmtSF)]
 ```
 
+So here the *data_description* is not consistent.
+The general condition is set to *noBasement* but there are values
+for basement exposure, quality, and so on.
 
 ```{r}
-contVars
+setdiff(which(full$GarageType == "noGarage"),
+          which(full$GarageFinish == "noGarage"))
+setdiff(which(full$GarageType == "noGarage"),
+          which(full$GarageQual == "noGarage"))
+setdiff(which(full$GarageType == "noGarage"),
+          which(full$GarageCond == "noGarage"))
 ```
 
+The garage features doesn't have these inconsistencies.
+The dependencies are stored in a list.
+For garage the feature *BsmtCond* is used as the reference as it seems to be
+the most stringent one.
+
+```{r}
+featDeps <- list(
+  BsmtCond = c("BsmtUnfSF", "TotalBsmtSF"),
+  BsmtFinType1 = "BsmtFinSF1",
+  BsmtFinType2 = "BsmtFinSF2",
+  GarageType = c("GarageYrBlt", "GarageCars", "GarageArea"),
+  PoolQC = "PoolArea",
+  MiscFeature = "MiscVal",
+  MasVnrType = "MasVnrArea"
+)
+```
 
 ## Missing Data
 
@@ -241,8 +270,6 @@ $NA$ which are left must be true missing data.
 The following table gives a complete summary of missing data.
 
 ```{r}
-full <- rbind(train[, -ncol(train), with = FALSE], test)
-full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
 naFeats <- vapply(
   colnames(full),
   function(j) any(is.na(full[[j]])) || any(full[[j]] == ""),
@@ -252,10 +279,12 @@ md.pattern(full[, colnames(full)[naFeats], with = FALSE])
 ```
 
 The total number of missing values per feature will be saved.
+The features with at least one missing value are shown below.
 
 ```{r}
 mdpat <- md.pattern(full[, -c(1, ncol(train)), with = FALSE])
-featAttr$missing <- mdpat[nrow(mdpat), -nrow(mdpat)]
+total <- mdpat[nrow(mdpat), -ncol(mdpat)]
+featAttr$missing <- total[match(featAttr$name, names(total))]
 dt <- featAttr[missing > 0, ]
 dt$name <- factor(dt$name, levels = dt$name[order(dt$missing)])
 ggplot(dt, aes(x = name, y = missing, fill = type)) +
