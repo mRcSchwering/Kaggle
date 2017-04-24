@@ -29,6 +29,7 @@ The following libraries will be used.
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 library(data.table) # database-like tables
 library(ggplot2) # general plots
+library(highcharter) # interactive plots
 library(DT) # display tables
 library(corrplot) # corr SPLOMs
 library(vcd) # stats for categories
@@ -349,7 +350,7 @@ Values were log10 transformed to better capture their spread.
 There are many zeros, partly because of the dependency to another variable.
 These zeros are excluded during the transformation.
 
-```{r, fig.width=10, fig.height=10, warning=FALSE}
+```{r, fig.width=10, fig.height=8, warning=FALSE}
 dt <- melt(full, "Id", contVars)
 ggplot(dt, aes(x = value)) +
   geom_histogram(bins = 30) +
@@ -404,7 +405,6 @@ DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>%
 ```
 
 
-
 ### Discrete Variables
 
 Distributions are shown below.
@@ -417,44 +417,53 @@ ggplot(dt, aes(x = value)) +
   theme_bw()
 ```
 
-As summary, the value range, mean and median of the categorical
-distribution, and cardinality are computed.
+As summary, the value range, and cardinality are computed.
 
 ```{r}
 dt <- full[, discVars, with = FALSE]
 df <- data.frame(
+  Card = apply(dt, 2, function(x) length(unique(x[!is.na(x)]))),
   Min = apply(dt, 2, function(x) min(as.numeric(as.character(x)), na.rm = TRUE)),
-  Max = apply(dt, 2, function(x) max(as.numeric(as.character(x)), na.rm = TRUE)),
-  MeanCount = apply(dt, 2, function(x) mean(table(x[!is.na(x)]))),
-  MedianCount = apply(dt, 2, function(x) median(table(x[!is.na(x)]))),
-  Card = apply(dt, 2, function(x) length(unique(x[!is.na(x)])))
+  Max = apply(dt, 2, function(x) max(as.numeric(as.character(x)), na.rm = TRUE))
 )
 ```
 
-Relative difference between mean and median count (*relDelta*) are 
-computed as an indicator for skewness.
-Outliers in categorical distribution are detected.
+Apart from that, the modes are usually interesting.
+For this a function has to be defined first.
 
 ```{r}
-df$relDelta <- abs(df$MeanCount - df$MedianCount) / df$MeanCount
-df$relOut <- apply(dt, 2, function(x) {
-  length(boxplot.stats(table(x[!is.na(x)]))$out) / length(x[!is.na(x)])
-})
+Mode <- function(x, fst = TRUE) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  modeIdx <- which.max(tab)
+  if (fst) return(list(value = ux[modeIdx], freq = tab[modeIdx]))
+  tab[modeIdx] <- 0
+  modeIdx <- which.max(tab)
+  return(list(value = ux[modeIdx], freq = tab[modeIdx]))
+}
 ```
 
-Actually, *relDelta* and outliers are only interesting for the *year* variables 
-where there is a high cardinality.
+First and second modes are computed and the table is shown.
+Modes that make up more than 50% of observations will be highlighted.
 
 ```{r}
+df$Mode <- apply(dt, 2, function(x) Mode(x)$value)
+df$ModeCount <- apply(dt, 2, function(x) Mode(x)$freq)
+df$Mode2nd <- apply(dt, 2, function(x) Mode(x, fst = FALSE)$value)
+df$ModeCount2nd <- apply(dt, 2, function(x) Mode(x, fst = FALSE)$freq)
 DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
-  formatStyle('relDelta', 
-    color = styleInterval(c(0.2, 0.8), c('green', 'orange', 'red'))) %>%
-  formatStyle('relOut', 
-    color = styleInterval(c(0.05, 0.1), c('green', 'orange', 'red'))) %>%
-  formatRound(c(3, 6:7), 3)
+  formatStyle('ModeCount', 
+    color = styleInterval(nrow(dt) / 2, c("black", 'orange')))
 ```
 
+In *GarageYrBlt* the maximum value is 2207, which does not make sense.
+It seems that this is a typo and the real value is 2007.
+After checking that there are not more values above 2010
+2207 is changed to 2007.
 
+```{r, results='hide'}
+full[GarageYrBlt == 2207, GarageYrBlt := "2007"]
+```
 
 
 ### Categorical Variables
@@ -479,114 +488,49 @@ ggplot(dt, aes(x = value)) +
   theme_bw()
 ```
 
-
 **Summary**
+
+Cardinality, 1st and 2nd modes are given as summary.
+Modes that make up more than 50% of observations will be highlighted.
 
 ```{r}
 dt <- full[, c(ordVars, nomVars), with = FALSE]
 df <- data.frame(
-  MeanCount = apply(dt, 2, function(x) mean(table(x[!is.na(x)]))),
-  MedianCount = apply(dt, 2, function(x) median(table(x[!is.na(x)]))),
   Card = apply(dt, 2, function(x) length(unique(x[!is.na(x)]))),
+  Mode = apply(dt, 2, function(x) Mode(x)$value),
+  ModeCount = apply(dt, 2, function(x) Mode(x)$freq),
+  Mode2nd = apply(dt, 2, function(x) Mode(x, fst = FALSE)$value),
+  ModeCount2nd = apply(dt, 2, function(x) Mode(x, fst = FALSE)$freq),
   Type = rep(c("ord", "nom"), c(length(ordVars), length(nomVars)))
 )
-```
-
-The indicators from above don't make much sense for these.
-
-```{r}
 DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
   formatStyle('Type', 
-    color = styleEqual(unique(df$Type), c('orange', 'blue'))) %>%
-  formatRound(1, 3)
+    color = styleEqual(unique(df$Type), c('orange', 'blue'))) %>% 
+  formatStyle('ModeCount', 
+    color = styleInterval(nrow(dt) / 2, c("black", 'orange')))
 ```
 
 
 
 
 
+## Correlations between Features
 
-
-
-
-
-
-
-
-
-Discrete features will be included in both categorical and continuous feature
-analysis.
-
-## Continuous
-
-### Feature Distributions
-
-The following table gives a descriptive overview about continuous and discrete
-feature distributions.
-Besides the range and averages of variables, the relative difference between
-mean and median is given as an indicator of the skewness.
-In addition the relative cardinality and the abundance of outliers are given.
+### Continuous
 
 ```{r}
 vars <- c(contVars, discVars)
-m <- apply(full[, vars, with = FALSE], 2,
-      function(j) summary(as.numeric(as.character(j)))[c(1, 3, 4, 6)])
-cards <- c(featAttr[type == "continuous", card], 
-           featAttr[type == "discrete", card])
-outs <- apply(full[, vars, with = FALSE], 2, 
-              function(j) length(boxplot.stats(j)$out) / length(j))
-dt <- data.table(t(m))
-dt$relDelta <- round((dt$Mean - dt$Median) / dt$Mean, 2)
-dt$relCard <- round(cards, 2)
-dt$relOuts <- round(outs, 2)
-rownames(dt) <- vars
-dt$type <- rep(c("cont", "disc"), c(length(contVars), length(discVars)))
-DT::datatable(dt, options = list(dom = "t", pageLength = 40)) %>% 
-  formatStyle(
-    'relDelta', 
-    color = styleInterval(c(0.2, 0.8), c('green', 'orange', 'red'))
-  ) %>%
-  formatStyle(
-    'relCard', 
-    color = styleInterval(c(0.2, 0.6), c('red', 'orange', 'green'))
-  ) %>%
-  formatStyle(
-    'relOuts', 
-    color = styleInterval(c(0.05, 0.1), c('green', 'orange', 'red'))
-  ) %>%
-  formatStyle(
-    'type', 
-    color = styleEqual(unique(dt$type), c('orange', 'blue'))
-  )
 ```
-
-In *GarageYrBlt* the maximum value is 2207, which does not make sense.
-It seems that this is a type and the real value is 2007.
-After checking that there are not more values above 2010
-2207 is changed to 2007.
-
-```{r, results='hide'}
-full[GarageYrBlt == 2207, GarageYrBlt := 2007]
-```
-
-There are a lot of continuous features with low cardinality and a high
-difference between mean and median.
-All these variables have a median of 0.
-Some of these variables are dependent on other categorical variables, 
-so it is plausible that they are sparse.
-
-
-### Correlatio between Features
 
 The Pearson Correlation Coefficient is calculated for all feature pairs
-where both features are discrete or continous.
+where both features are continuous.
 The results are shown as heatmap below.
 Using euclidean distance of the correlation matrix as a metric 
 rows and columns were hierarchically ordered (complete link).
 
 ```{r, fig.width=10, fig.height=10}
 m <- cor(
-  full[, vars, with = FALSE],
+  full[, contVars, with = FALSE],
   use = "complete.obs"
 )
 corrplot(m, method = "color", order = "hclust")
@@ -601,141 +545,50 @@ plot(corrClust)
 ```
 
 
-### Correlation to Target
+### Categorical
 
-For all continuous features the pearson correlation coefficient
-to the target *SalePrice* is calculated.
-Results are ordered by correlation.
-The color labels the feature type, continuous or discrete.
-
-```{r, fig.width=10, fig.height=5}
-train <- full[label == "train", !"label", with = FALSE]
-cors <- vapply(
-  vars,
-  function(i) cor(train[[i]], train$SalePrice, use = "complete.obs"),
-  numeric(1)
-)
-df <- data.frame(
-  var = factor(vars, levels = vars[order(cors)]),
-  cor = cors,
-  type = rep(c("cont", "disc"), c(length(contVars), length(discVars)))
-)
-ggplot(df, aes(x = var, y = cor, fill = type)) +
-  geom_bar(stat = "identity") +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  ggtitle("P Correl Coeff of Cont+Disc Features vs SalePrice")
-```
-
-
-
-
-
-
-
-
-## Categorical
-
-### Feature Distributions
-
-As an overview of these features their 
-categorical distribution is described.
-The table below summarizes range and averages, as well as the relative
-difference between mean and median (*relDalta*).
+Here, discrete variables are included.
 
 ```{r}
 vars <- c(discVars, ordVars, nomVars)
-m <- apply(full[, vars, with = FALSE], 2, 
-           function(j) summary(as.vector(table(j)))[c(1, 3, 4, 6)])
-dt <- data.table(t(m))
-dt$relDelta <- round((dt$Mean - dt$Median) / dt$Mean, 2)
-dt$type <- rep(c("disc", "ord", "nom"), 
-               c(length(discVars), length(ordVars), length(nomVars)))
-rownames(dt) <- vars
-DT::datatable(dt, options = list(dom = "t", pageLength = 40)) %>% 
-  formatStyle(
-    'relDelta', 
-    color = styleInterval(c(0.2, 0.8), c('green', 'orange', 'red'))
-  ) %>%
-  formatStyle(
-    'type', 
-    color = styleEqual(unique(dt$type), c('orange', 'blue', 'pink'))
-  )
 ```
 
-For most variables there is a big difference in the frequency of
-classes that can occur.
-There is no feature where a class can be completely excluded, 
-but there are some features which have classes with only one representation.
-
-
-
-
-
-
-
-
-
-### Correlation between Features
-
-The Cramer's V is calculated for all feature pairs
-where both features are categories.
+For categorical features Cramer's V is calculated for all feature pairs
+to indicate correlation.
 The results are shown as heatmap below.
-Using euclidean distance of the correlation matrix as a metric 
-rows and columns were hierarchically ordered (complete link).
 
 ```{r, fig.width=10, fig.height=10, warning=FALSE}
 m <- as.matrix(full[, vars, with = FALSE])
 m <- m[complete.cases(m), ]
-mCramer <- vapply(
-  seq_len(ncol(m)),
-  function(i) {
-    vapply(
-      seq_len(ncol(m)),
-      function(j) {
-        assocstats(table(m[, i], m[, j]))$cramer
-      },
-      numeric(1)
-    )
-  },
-  numeric(ncol(m))
-)
+mCramer <- matrix(NA, ncol(m), ncol(m))
+for (i in seq_len(ncol(m))) {
+  mCramer[i, ] <- vapply(
+    seq_len(ncol(m)), 
+    function(j) assocstats(table(m[, i], m[, j]))$cramer, 
+    numeric(1)
+  )
+}
+```
+
+Using euclidean distance of the correlation matrix as a metric 
+rows and columns were hierarchically ordered (complete link).
+
+```{r}
 colnames(mCramer) <- colnames(m)
 rownames(mCramer) <- colnames(m)
 corrplot(mCramer, method = "color", order = "hclust")
 ```
 
-The same hierarchical clustering is shown as tree below.
+The tree for the clustering:
 
 ```{r}
 corrClust <- hclust(dist(mCramer))
 plot(corrClust)
 ```
 
-### Correlation to Target
 
-For all categorical features the Kruskal-Wallis $\chi^2$ statistic
-to the target *SalePrice* is calculated.
-Results are ordered by the $\chi^2$ value.
-The color labels the feature type, nominal or ordinal.
 
-```{r, fig.width=10, fig.height=5, warning=FALSE}
-kwX2 <- vapply(
-  vars,
-  function(j) { kruskal.test(train$SalePrice, train[[j]])$statistic },
-  numeric(1)
-)
-df <- data.frame(
-  var = factor(vars, levels = vars[order(kwX2)]),
-  kwX2 = kwX2,
-  type = rep(c("disc", "ord", "nom"), c(length(discVars), length(ordVars), length(nomVars)))
-)
-ggplot(df, aes(x = var, y = kwX2, fill = type)) +
-  geom_bar(stat = "identity") +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  ggtitle("KW-X^2 for Categories+Disc Feats vs SalePrice")
-```
+
 
 
 
@@ -750,18 +603,26 @@ ggplot(df, aes(x = var, y = kwX2, fill = type)) +
 
 
 
+
+
+
+
+
+
+
+
 # Imputation
 
 Featrues with missing values are.
 
 ```{r}
-featAttr[missing > 0, ]
+# featAttr[missing > 0, ]
 ```
 
 Imputation methods are defined.
 
 ```{r}
-featAttr$impMethod <- ""
+# featAttr$impMethod <- ""
 ```
 
 Continuous variables should be imputed using predictive mean matching,
@@ -770,30 +631,30 @@ other discrete and ordinal variables using proportional odds,
 others using polytomous regression.
 
 ```{r, results='hide'}
-featAttr[missing > 0, impMethod := "polyreg"]
-featAttr[missing > 0 & type == "ordinal", impMethod := "polr"]
-featAttr[missing > 0 & type == "discrete", impMethod := "polr"]
-featAttr[missing > 0 & card == 2, impMethod := "logreg"]
-featAttr[missing > 0 & type == "continuous", impMethod := "pmm"]
+# featAttr[missing > 0, impMethod := "polyreg"]
+# featAttr[missing > 0 & type == "ordinal", impMethod := "polr"]
+# featAttr[missing > 0 & type == "discrete", impMethod := "polr"]
+# featAttr[missing > 0 & card == 2, impMethod := "logreg"]
+# featAttr[missing > 0 & type == "continuous", impMethod := "pmm"]
 ```
 
 
 
 ```{r}
-imp <- mice(full, method = c("", featAttr$impMethod, ""))
-imp <- mice(full)
+# imp <- mice(full, method = c("", featAttr$impMethod, ""))
+# imp <- mice(full)
 ```
 
 
 
 ```{r}
-imp <- mice(full[, .(Utilities)])
-str(full)
-unique(full$Utilities)
-
-imp <- mice(full, seed = 42)
-?mice
-
+# imp <- mice(full[, .(Utilities)])
+# str(full)
+# unique(full$Utilities)
+# 
+# imp <- mice(full, seed = 42)
+# ?mice
+# 
 
 ```
 
