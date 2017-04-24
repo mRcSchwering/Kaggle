@@ -30,7 +30,6 @@ The following libraries will be used.
 library(data.table) # database-like tables
 library(ggplot2) # general plots
 library(DT) # display tables
-library(fitdistrplus) # fit distributions
 library(corrplot) # corr SPLOMs
 library(vcd) # stats for categories
 library(mice) # for imputation
@@ -63,17 +62,21 @@ train <- data.table(train)
 # Data Quality
 
 The number of dimensions and density of the input matrix is calculated.
+The datasets are combined.
 
 ```{r}
 (N <- nrow(train))
 (p <- ncol(train) - 2)
 N^(1/p)
+test$SalePrice <- NaN
+full <- rbind(train, test)
 ```
 
-## Variable Types
+## Feature Attributes
 
 From the *data_description* variable types can be defined.
 There are 4 categories: *nominal*, *ordinal*, *discrete*, *continuous*.
+A lot of the discrete variables could arguably be handled as ordinals.
 
 ```{r}
 nomVars <- c("MSZoning", "Street", "Alley", "LandContour", "LotConfig",
@@ -111,16 +114,13 @@ featAttr[name %in% discVars, type := "discrete"]
 featAttr[name %in% contVars, type := "continuous"]
 ```
 
-
-## Special Values
+**Special Values**
 
 According to *data_description* several $NA$ have a special meaning.
 These values are replaced with more descriptive `chr` strings.
 Before, test and train set are combined.
 
 ```{r, results='hide', message=FALSE}
-test$SalePrice <- NaN
-full <- rbind(train, test)
 full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
 full[is.na(Alley), Alley := "noAccess"]
 full[is.na(BsmtQual), BsmtQual := "noBasement"]
@@ -138,16 +138,15 @@ full[is.na(Fence), Fence := "noFence"]
 full[is.na(MiscFeature), MiscFeature := "none"]
 ```
 
-Nominal and ordinal variables are converted to `factor`,
-continuous and discrete to `numeric` and `integer` respectively.
+Nominal, ordinal, and discrete variables are converted to `factor`,
+continuous to `numeric`.
 
 ```{r}
-for (j in c(nomVars, ordVars)) full[[j]] <- as.factor(full[[j]])
-for (j in discVars) full[[j]] <- as.integer(full[[j]])
+for (j in c(nomVars, ordVars, discVars)) full[[j]] <- as.factor(full[[j]])
 for (j in contVars) full[[j]] <- as.numeric(full[[j]])
 ```
 
-## Ordering
+**Ordering**
 
 From *data_description* the order of ordinal variable classes can be derived.
 These orderings are defined, then the `levels` of their `factors` are adjusted.
@@ -230,51 +229,83 @@ setdiff(which(full$GarageType == "noGarage"),
 
 The garage features doesn't have these inconsistencies.
 
-All dependencies are stored in a list.
-For garage the feature *BsmtCond* is used as the reference since it seems to be
-the most stringent one.
+**Mark Undefined Variables**
 
-```{r}
-featDeps <- list(
-  BsmtCond = c("BsmtUnfSF", "TotalBsmtSF"),
-  BsmtFinType1 = "BsmtFinSF1",
-  BsmtFinType2 = "BsmtFinSF2",
-  GarageType = c("GarageYrBlt", "GarageCars", "GarageArea"),
-  PoolQC = "PoolArea",
-  MiscFeature = "MiscVal",
-  MasVnrType = "MasVnrArea"
-)
+If e.g. *PoolQC* is *noPool*, then there should be a missing vlaue or
+a zero for *PoolArea*.
+If there actually is a value, this could either mean it is a mistake
+or it means something special that is not clearly described.
+To at least be consistent, all *NA*s will be set to 0.
+
+```{r, results='hide'}
+full[BsmtCond == "noBasement" & is.na(BsmtUnfSF), BsmtUnfSF := 0]
+full[BsmtCond == "noBasement" & is.na(TotalBsmtSF), TotalBsmtSF := 0]
+full[BsmtFinType1 == "noBasement" & is.na(BsmtFinSF1), BsmtFinSF1 := 0]
+full[BsmtFinType2 == "noBasement" & is.na(BsmtFinSF2), BsmtFinSF2 := 0]
+full[GarageType == "noGarage" & is.na(GarageYrBlt), GarageYrBlt := "0"]
+full[GarageType == "noGarage" & is.na(GarageCars), GarageCars := "0"]
+full[GarageType == "noGarage" & is.na(GarageArea), GarageArea := 0]
+full[PoolQC == "noPool" & is.na(PoolArea), PoolArea := 0]
+full[MiscFeature == "noFeature" & is.na(MiscVal), MiscVal := 0]
 ```
+
+
+
+
+
 
 ## Missing Data
 
 $NA$ which are left must be true missing data.
-The following table gives a complete summary of missing data.
 
 ```{r}
-naFeats <- vapply(
-  colnames(full),
-  function(j) any(is.na(full[[j]])) || any(full[[j]] == ""),
-  logical(1)
-)
-md.pattern(full[, colnames(full)[naFeats], with = FALSE])
+naFeats <- apply(full[, !"SalePrice"], 2, function(x) any(is.na(x)))
+naObs <- apply(full[, !"SalePrice"], 1, function(x) any(is.na(x)))
 ```
+
+**Features**
 
 The total number of missing values per feature will be saved.
 The features with at least one missing value are shown below.
 
-```{r, warning=FALSE}
-mdpat <- md.pattern(full[, -ncol(train), with = FALSE])
-total <- mdpat[nrow(mdpat), -ncol(mdpat)]
-featAttr$missing <- total[match(featAttr$name, names(total))]
-dt <- featAttr[missing > 0, ]
-dt$name <- factor(dt$name, levels = dt$name[order(dt$missing)])
-ggplot(dt, aes(x = name, y = missing, fill = type)) +
+```{r}
+total <- apply(full[, naFeats, with = FALSE], 2, function(j) sum(is.na(j)))
+df <- data.frame(
+  missing = total / nrow(full),
+  name = factor(names(total), levels = names(total)[order(total)]),
+  type = featAttr[match(names(total), featAttr$name), type]
+)
+ggplot(df, aes(x = name, y = missing, fill = type)) +
   geom_bar(stat = "identity") +
+  scale_y_continuous("proportion missing") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   ggtitle("Features with Missing Values")
 ```
+
+**Observations**
+
+Below the number of missing values for observations that have missing values
+is shown.
+Many observations have 1 or 2, some have 3 or 4 missing values.
+
+```{r}
+total <- apply(full[naObs, ], 1, function(i) sum(is.na(i)))
+df <- data.frame(
+  y = total,
+  name = full[naObs, Id]
+)
+highchart() %>%
+    hc_chart(type = "column") %>%
+    hc_title(text = "Observations with Missing Values") %>%
+    hc_xAxis(title = list(text = "observations"), categories = df$name, 
+             labels  = list(rotation = "-45")) %>%
+    hc_yAxis(title = list(text = "missing"), align = "left") %>%
+    hc_add_series(showInLegend = FALSE, data = list_parse(df[order(df$y), ]))
+```
+
+
+
 
 
 
@@ -297,12 +328,196 @@ ggplot(dt, aes(x = name, y = missing, fill = type)) +
 
 
 
+
+
+
+
+
+
+
+
 # Feature Exploration
 
 
+## Feature Distributions
+
+Feature distributions are described for each type of variable separately.
+
+### Continuous Variables
+
+Values were log10 transformed to better capture their spread.
+There are many zeros, partly because of the dependency to another variable.
+These zeros are excluded during the transformation.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+dt <- melt(full, "Id", contVars)
+ggplot(dt, aes(x = value)) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(trans = "log10") +
+  facet_wrap(~ variable, scale = "free") +
+  theme_bw()
+```
+
+Summaries for each distribution are computed.
+There are many undefined variables which are set to zero.
+This influences the description a lot.
+Therefore, they are excluded.
+
+```{r}
+dt <- full[, contVars, with = FALSE]
+df <- data.frame(
+  Min = apply(dt, 2, function(x) min(x[x > 0], na.rm = TRUE)),
+  Mean = apply(dt, 2, function(x) mean(x[x > 0], na.rm = TRUE)),
+  Median = apply(dt, 2, function(x) median(x[x > 0], na.rm = TRUE)),
+  Max = apply(dt, 2, function(x) max(x[x > 0], na.rm = TRUE))
+)
+```
+
+Relative difference between mean and median (*relDelta*) are computed as an
+indicator for skewness.
+Also, relative cardinality and relative number of outliers are computed.
+Outliers are defined as being differing at least $+/- 1.5 MAD$ from the median.
+
+```{r}
+df$relDelta <- abs(df$Mean - df$Median) / df$Mean
+df$relCard <- apply(dt, 2, function(x) {
+  length(unique(x[x > 0])) / length(x[x > 0])
+})
+df$relOut <- apply(dt, 2, function(x) {
+  length(boxplot.stats(x[x > 0])$out) / length(x[x > 0])
+})
+```
+
+*PoolArea* and *MiscVal* show a high proportion of outliers,
+but this might be because there are not many total values for these variables.
+Many supposably continuous variables have a quite low cardinality.
+
+```{r}
+DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
+  formatStyle('relDelta', 
+    color = styleInterval(c(0.2, 0.8), c('green', 'orange', 'red'))) %>%
+  formatStyle('relCard', 
+    color = styleInterval(c(0.2, 0.6), c('red', 'orange', 'green'))) %>%
+  formatStyle('relOut', 
+    color = styleInterval(c(0.05, 0.1), c('green', 'orange', 'red'))) %>%
+  formatRound(c(2, 5:7), 3)
+```
 
 
-## Continuous and Discrete Features
+
+### Discrete Variables
+
+Distributions are shown below.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+dt <- melt(full, "Id", discVars)
+ggplot(dt, aes(x = value)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free") +
+  theme_bw()
+```
+
+As summary, the value range, mean and median of the categorical
+distribution, and cardinality are computed.
+
+```{r}
+dt <- full[, discVars, with = FALSE]
+df <- data.frame(
+  Min = apply(dt, 2, function(x) min(as.numeric(as.character(x)), na.rm = TRUE)),
+  Max = apply(dt, 2, function(x) max(as.numeric(as.character(x)), na.rm = TRUE)),
+  MeanCount = apply(dt, 2, function(x) mean(table(x[!is.na(x)]))),
+  MedianCount = apply(dt, 2, function(x) median(table(x[!is.na(x)]))),
+  Card = apply(dt, 2, function(x) length(unique(x[!is.na(x)])))
+)
+```
+
+Relative difference between mean and median count (*relDelta*) are 
+computed as an indicator for skewness.
+Outliers in categorical distribution are detected.
+
+```{r}
+df$relDelta <- abs(df$MeanCount - df$MedianCount) / df$MeanCount
+df$relOut <- apply(dt, 2, function(x) {
+  length(boxplot.stats(table(x[!is.na(x)]))$out) / length(x[!is.na(x)])
+})
+```
+
+Actually, *relDelta* and outliers are only interesting for the *year* variables 
+where there is a high cardinality.
+
+```{r}
+DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
+  formatStyle('relDelta', 
+    color = styleInterval(c(0.2, 0.8), c('green', 'orange', 'red'))) %>%
+  formatStyle('relOut', 
+    color = styleInterval(c(0.05, 0.1), c('green', 'orange', 'red'))) %>%
+  formatRound(c(3, 6:7), 3)
+```
+
+
+
+
+### Categorical Variables
+
+**Ordinal Variables**
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+dt <- melt(full, "Id", ordVars)
+ggplot(dt, aes(x = value)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free") +
+  theme_bw()
+```
+
+**Nominal Variables**
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+dt <- melt(full, "Id", nomVars)
+ggplot(dt, aes(x = value)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free") +
+  theme_bw()
+```
+
+
+**Summary**
+
+```{r}
+dt <- full[, c(ordVars, nomVars), with = FALSE]
+df <- data.frame(
+  MeanCount = apply(dt, 2, function(x) mean(table(x[!is.na(x)]))),
+  MedianCount = apply(dt, 2, function(x) median(table(x[!is.na(x)]))),
+  Card = apply(dt, 2, function(x) length(unique(x[!is.na(x)]))),
+  Type = rep(c("ord", "nom"), c(length(ordVars), length(nomVars)))
+)
+```
+
+The indicators from above don't make much sense for these.
+
+```{r}
+DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
+  formatStyle('Type', 
+    color = styleEqual(unique(df$Type), c('orange', 'blue'))) %>%
+  formatRound(1, 3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Discrete features will be included in both categorical and continuous feature
+analysis.
+
+## Continuous
 
 ### Feature Distributions
 
@@ -313,17 +528,18 @@ mean and median is given as an indicator of the skewness.
 In addition the relative cardinality and the abundance of outliers are given.
 
 ```{r}
-m <- apply(full[, c(contVars, discVars), with = FALSE], 2,
-      function(j) summary(j)[c(1, 3, 4, 6)])
-cards <- apply(full[, c(contVars, discVars), with = FALSE], 2, 
-               function(j) length(unique(j)) / length(j))
-outs <- apply(full[, c(contVars, discVars), with = FALSE], 2, 
+vars <- c(contVars, discVars)
+m <- apply(full[, vars, with = FALSE], 2,
+      function(j) summary(as.numeric(as.character(j)))[c(1, 3, 4, 6)])
+cards <- c(featAttr[type == "continuous", card], 
+           featAttr[type == "discrete", card])
+outs <- apply(full[, vars, with = FALSE], 2, 
               function(j) length(boxplot.stats(j)$out) / length(j))
 dt <- data.table(t(m))
 dt$relDelta <- round((dt$Mean - dt$Median) / dt$Mean, 2)
 dt$relCard <- round(cards, 2)
 dt$relOuts <- round(outs, 2)
-rownames(dt) <- c(contVars, discVars)
+rownames(dt) <- vars
 dt$type <- rep(c("cont", "disc"), c(length(contVars), length(discVars)))
 DT::datatable(dt, options = list(dom = "t", pageLength = 40)) %>% 
   formatStyle(
@@ -360,11 +576,6 @@ Some of these variables are dependent on other categorical variables,
 so it is plausible that they are sparse.
 
 
-
-
-
-
-
 ### Correlatio between Features
 
 The Pearson Correlation Coefficient is calculated for all feature pairs
@@ -375,7 +586,7 @@ rows and columns were hierarchically ordered (complete link).
 
 ```{r, fig.width=10, fig.height=10}
 m <- cor(
-  full[, c(contVars, discVars), with = FALSE],
+  full[, vars, with = FALSE],
   use = "complete.obs"
 )
 corrplot(m, method = "color", order = "hclust")
@@ -392,7 +603,7 @@ plot(corrClust)
 
 ### Correlation to Target
 
-For all continuous and discrete features the pearson correlation coefficient
+For all continuous features the pearson correlation coefficient
 to the target *SalePrice* is calculated.
 Results are ordered by correlation.
 The color labels the feature type, continuous or discrete.
@@ -400,13 +611,12 @@ The color labels the feature type, continuous or discrete.
 ```{r, fig.width=10, fig.height=5}
 train <- full[label == "train", !"label", with = FALSE]
 cors <- vapply(
-  c(contVars, discVars),
+  vars,
   function(i) cor(train[[i]], train$SalePrice, use = "complete.obs"),
   numeric(1)
 )
 df <- data.frame(
-  var = factor(c(contVars, discVars),
-               levels = c(contVars, discVars)[order(cors)]),
+  var = factor(vars, levels = vars[order(cors)]),
   cor = cors,
   type = rep(c("cont", "disc"), c(length(contVars), length(discVars)))
 )
@@ -414,7 +624,7 @@ ggplot(df, aes(x = var, y = cor, fill = type)) +
   geom_bar(stat = "identity") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  ggtitle("P Correl Coeff of Cont+Discr Features vs SalePrice")
+  ggtitle("P Correl Coeff of Cont+Disc Features vs SalePrice")
 ```
 
 
@@ -424,22 +634,24 @@ ggplot(df, aes(x = var, y = cor, fill = type)) +
 
 
 
-## Categorical Features
+## Categorical
 
 ### Feature Distributions
 
-As an overview of nominal and ordinal features their 
+As an overview of these features their 
 categorical distribution is described.
 The table below summarizes range and averages, as well as the relative
 difference between mean and median (*relDalta*).
 
 ```{r}
-m <- apply(full[, c(ordVars, nomVars), with = FALSE], 2, 
+vars <- c(discVars, ordVars, nomVars)
+m <- apply(full[, vars, with = FALSE], 2, 
            function(j) summary(as.vector(table(j)))[c(1, 3, 4, 6)])
 dt <- data.table(t(m))
 dt$relDelta <- round((dt$Mean - dt$Median) / dt$Mean, 2)
-dt$type <- rep(c("ord", "nom"), c(length(ordVars), length(nomVars)))
-rownames(dt) <- c(ordVars, nomVars)
+dt$type <- rep(c("disc", "ord", "nom"), 
+               c(length(discVars), length(ordVars), length(nomVars)))
+rownames(dt) <- vars
 DT::datatable(dt, options = list(dom = "t", pageLength = 40)) %>% 
   formatStyle(
     'relDelta', 
@@ -447,7 +659,7 @@ DT::datatable(dt, options = list(dom = "t", pageLength = 40)) %>%
   ) %>%
   formatStyle(
     'type', 
-    color = styleEqual(unique(dt$type), c('orange', 'blue'))
+    color = styleEqual(unique(dt$type), c('orange', 'blue', 'pink'))
   )
 ```
 
@@ -455,6 +667,14 @@ For most variables there is a big difference in the frequency of
 classes that can occur.
 There is no feature where a class can be completely excluded, 
 but there are some features which have classes with only one representation.
+
+
+
+
+
+
+
+
 
 ### Correlation between Features
 
@@ -465,7 +685,7 @@ Using euclidean distance of the correlation matrix as a metric
 rows and columns were hierarchically ordered (complete link).
 
 ```{r, fig.width=10, fig.height=10, warning=FALSE}
-m <- as.matrix(full[, c(ordVars, nomVars), with = FALSE])
+m <- as.matrix(full[, vars, with = FALSE])
 m <- m[complete.cases(m), ]
 mCramer <- vapply(
   seq_len(ncol(m)),
@@ -501,21 +721,20 @@ The color labels the feature type, nominal or ordinal.
 
 ```{r, fig.width=10, fig.height=5, warning=FALSE}
 kwX2 <- vapply(
-  c(ordVars, nomVars),
+  vars,
   function(j) { kruskal.test(train$SalePrice, train[[j]])$statistic },
   numeric(1)
 )
 df <- data.frame(
-  var = factor(c(ordVars, nomVars),
-               levels = c(ordVars, nomVars)[order(kwX2)]),
+  var = factor(vars, levels = vars[order(kwX2)]),
   kwX2 = kwX2,
-  type = rep(c("ord", "nom"), c(length(ordVars), length(nomVars)))
+  type = rep(c("disc", "ord", "nom"), c(length(discVars), length(ordVars), length(nomVars)))
 )
 ggplot(df, aes(x = var, y = kwX2, fill = type)) +
   geom_bar(stat = "identity") +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  ggtitle("KW-X^2 for Categories vs SalePrice")
+  ggtitle("KW-X^2 for Categories+Disc Feats vs SalePrice")
 ```
 
 
@@ -525,4 +744,56 @@ ggplot(df, aes(x = var, y = kwX2, fill = type)) +
 
 
 ***
+
+
+
+
+
+
+# Imputation
+
+Featrues with missing values are.
+
+```{r}
+featAttr[missing > 0, ]
+```
+
+Imputation methods are defined.
+
+```{r}
+featAttr$impMethod <- ""
+```
+
+Continuous variables should be imputed using predictive mean matching,
+binary variables using logistic regression,
+other discrete and ordinal variables using proportional odds,
+others using polytomous regression.
+
+```{r, results='hide'}
+featAttr[missing > 0, impMethod := "polyreg"]
+featAttr[missing > 0 & type == "ordinal", impMethod := "polr"]
+featAttr[missing > 0 & type == "discrete", impMethod := "polr"]
+featAttr[missing > 0 & card == 2, impMethod := "logreg"]
+featAttr[missing > 0 & type == "continuous", impMethod := "pmm"]
+```
+
+
+
+```{r}
+imp <- mice(full, method = c("", featAttr$impMethod, ""))
+imp <- mice(full)
+```
+
+
+
+```{r}
+imp <- mice(full[, .(Utilities)])
+str(full)
+unique(full$Utilities)
+
+imp <- mice(full, seed = 42)
+?mice
+
+
+```
 

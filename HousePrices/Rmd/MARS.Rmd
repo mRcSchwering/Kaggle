@@ -1,0 +1,154 @@
+---
+title: "Housing Cri.. Prices"
+subtitle: "Data Exploration"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+
+
+# Preparation
+
+
+
+**Loading Data**
+
+The following libraries will be used.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(data.table) # database-like tables
+library(ggplot2) # general plots
+library(DT) # display tables
+library(corrplot) # corr SPLOMs
+library(vcd) # stats for categories
+library(mice) # for imputation
+library(earth) # MARS
+```
+
+Input is loaded and covnerted to `data.table`.
+
+```{r}
+test <- read.csv("../input/test.csv")
+train <- read.csv("../input/train.csv")
+test <- data.table(test)
+train <- data.table(train)
+```
+
+4 variables types are defined: *nominal*, *ordinal*, *discrete*, *continuous*.
+
+```{r}
+nomVars <- c("MSZoning", "Street", "Alley", "LandContour", "LotConfig",
+             "Neighborhood", "Condition1", "Condition2", "HouseStyle",
+             "RoofStyle", "RoofMatl", "Exterior1st", "Exterior2nd",
+             "MasVnrType", "Foundation", "Heating", "CentralAir", "Electrical",
+             "GarageType", "PavedDrive", "MiscFeature", "SaleType",
+             "SaleCondition")
+ordVars <- c("MSSubClass", "LotShape", "Utilities", "LandSlope", "BldgType",
+             "OverallQual", "OverallCond", "ExterQual", "ExterCond", "BsmtQual",
+             "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2",
+             "HeatingQC", "KitchenQual", "Functional", "FireplaceQu",
+             "GarageFinish", "GarageQual", "GarageCond", "PoolQC", "Fence",
+             "MoSold")
+discVars <- c("YearBuilt", "YearRemodAdd", "BsmtFullBath", "BsmtHalfBath",
+              "FullBath", "HalfBath", "BedroomAbvGr", "KitchenAbvGr",
+              "TotRmsAbvGrd", "Fireplaces", "GarageYrBlt", "GarageCars",
+              "YrSold")
+contVars <- c("LotArea", "MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF",
+              "TotalBsmtSF", "X1stFlrSF", "X2ndFlrSF", "LowQualFinSF",
+              "GrLivArea", "GarageArea", "WoodDeckSF", "OpenPorchSF",
+              "EnclosedPorch", "X3SsnPorch", "ScreenPorch", "PoolArea",
+              "MiscVal", "LotFrontage")
+```
+
+Speciel $NA$s are replaced.
+
+```{r, results='hide', message=FALSE}
+test$SalePrice <- NaN
+full <- rbind(train, test)
+full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
+full[is.na(Alley), Alley := "noAccess"]
+full[is.na(BsmtQual), BsmtQual := "noBasement"]
+full[is.na(BsmtCond), BsmtCond := "noBasement"]
+full[is.na(BsmtExposure), BsmtExposure := "noBasement"]
+full[is.na(BsmtFinType1), BsmtFinType1 := "noBasement"]
+full[is.na(BsmtFinType2), BsmtFinType2 := "noBasement"]
+full[is.na(FireplaceQu), FireplaceQu := "noFireplace"]
+full[is.na(GarageType), GarageType := "noGarage"]
+full[is.na(GarageFinish), GarageFinish := "noGarage"]
+full[is.na(GarageQual), GarageQual := "noGarage"]
+full[is.na(GarageCond), GarageCond := "noGarage"]
+full[is.na(PoolQC) , PoolQC := "noPool"]
+full[is.na(Fence), Fence := "noFence"]
+full[is.na(MiscFeature), MiscFeature := "none"]
+```
+
+Nominal and ordinal variables are converted to `factor`,
+continuous and discrete to `numeric` and `integer` respectively.
+
+```{r}
+for (j in c(nomVars, ordVars)) full[[j]] <- as.factor(full[[j]])
+for (j in discVars) full[[j]] <- as.integer(full[[j]])
+for (j in contVars) full[[j]] <- as.numeric(full[[j]])
+```
+
+Ordinal variable levels are corrected.
+
+```{r}
+lvlOrd <- list(
+  LotShape = c("Reg", "IR1", "IR2", "IR3"),
+  Utilities = c("AllPub", "NoSewr", "NoSeWa", "ELO"),
+  LandSlope = c("Gtl", "Mod", "Sev"),
+  BldgType = c("1Fam", "2FmCon", "Duplx", "TwnhsE", "TwnhsI"),
+  OverallQual = 10:1,
+  OverallCond = 10:1,
+  ExterQual = c("Ex", "Gd", "TA", "Fa", "Po"),
+  ExterCond = c("Ex", "Gd", "TA", "Fa", "Po"),
+  BsmtQual = c("Ex", "Gd", "TA", "Fa", "Po", "noBasement"),
+  BsmtCond = c("Ex", "Gd", "TA", "Fa", "Po", "noBasement"),
+  BsmtExposure = c("Gd", "Av", "Mn", "No", "noBasement"),
+  BsmtFinType1 = c("GLQ", "ALQ", "BLQ", "Rec", "LwQ", "Unf", "noBasement"),
+  BsmtFinType2 = c("GLQ", "ALQ", "BLQ", "Rec", "LwQ", "Unf", "noBasement"),
+  HeatingQC = c("Ex", "Gd", "TA", "Fa", "Po"),
+  KitchenQual = c("Ex", "Gd", "TA", "Fa", "Po"),
+  Functional = c("Typ", "Min1", "Min2", "Mod", "Maj1", "Maj2", "Sev", "Sal"),
+  FireplaceQu = c("Ex", "Gd", "TA", "Fa", "Po", "noFireplace"),
+  GarageFinish = c("Fin", "RFn", "Unf", "noGarage"),
+  GarageQual = c("Ex", "Gd", "TA", "Fa", "Po", "noGarage"),
+  GarageCond = c("Ex", "Gd", "TA", "Fa", "Po", "noGarage"),
+  PoolQC = c("Ex", "Gd", "TA", "Fa", "noPool"),
+  Fence = c("GdPrv", "MnPrv", "GdWo", "MnWw", "noFence"),
+  MoSold = 1:12
+)
+for (j in names(lvlOrd)) {
+  full[[j]] <- factor(full[[j]], levels = lvlOrd[[j]])
+}
+```
+
+
+
+
+***
+
+
+
+
+# Modeling
+
+```{r}
+?earth
+
+
+
+```
+
