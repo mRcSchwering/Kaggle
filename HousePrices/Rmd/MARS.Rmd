@@ -1,6 +1,6 @@
 ---
 title: "Housing Cri.. Prices"
-subtitle: "Data Exploration"
+subtitle: "Model MARS"
 author: "Marc Schwering"
 output:
   html_document:
@@ -18,36 +18,33 @@ output:
 
 
 
+
+
 # Preparation
 
-
+The following steps prepare the dataset for the modeling part.
+The actual feature analysis was done in another kernel.
 
 **Loading Data**
-
-The following libraries will be used.
 
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 library(data.table) # database-like tables
 library(ggplot2) # general plots
-library(DT) # display tables
-library(corrplot) # corr SPLOMs
 library(vcd) # stats for categories
-library(mice) # for imputation
+library(mice) # imputation
 library(earth) # MARS
+library(crossval) # doing CV
+test <- data.table(read.csv("../input/test.csv"))
+train <- data.table(read.csv("../input/train.csv"))
+test$SalePrice <- NaN
+full <- rbind(train, test)
+full$label <- rep(c("train", "test"), c(nrow(train), nrow(test)))
 ```
 
-Input is loaded and covnerted to `data.table`.
+**Feature Attributes**
 
-```{r}
-test <- read.csv("../input/test.csv")
-train <- read.csv("../input/train.csv")
-test <- data.table(test)
-train <- data.table(train)
-```
-
-4 variables types are defined: *nominal*, *ordinal*, *discrete*, *continuous*.
-
-```{r}
+```{r, results='hide'}
+# types
 nomVars <- c("MSZoning", "Street", "Alley", "LandContour", "LotConfig",
              "Neighborhood", "Condition1", "Condition2", "HouseStyle",
              "RoofStyle", "RoofMatl", "Exterior1st", "Exterior2nd",
@@ -69,14 +66,15 @@ contVars <- c("LotArea", "MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF",
               "GrLivArea", "GarageArea", "WoodDeckSF", "OpenPorchSF",
               "EnclosedPorch", "X3SsnPorch", "ScreenPorch", "PoolArea",
               "MiscVal", "LotFrontage")
-```
+featAttr <- data.table(
+  name = colnames(test)[-1],
+  type = "nominal"
+)
+featAttr[name %in% ordVars, type := "ordinal"]
+featAttr[name %in% discVars, type := "discrete"]
+featAttr[name %in% contVars, type := "continuous"]
 
-Speciel $NA$s are replaced.
-
-```{r, results='hide', message=FALSE}
-test$SalePrice <- NaN
-full <- rbind(train, test)
-full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
+# special values
 full[is.na(Alley), Alley := "noAccess"]
 full[is.na(BsmtQual), BsmtQual := "noBasement"]
 full[is.na(BsmtCond), BsmtCond := "noBasement"]
@@ -91,20 +89,10 @@ full[is.na(GarageCond), GarageCond := "noGarage"]
 full[is.na(PoolQC) , PoolQC := "noPool"]
 full[is.na(Fence), Fence := "noFence"]
 full[is.na(MiscFeature), MiscFeature := "none"]
-```
-
-Nominal and ordinal variables are converted to `factor`,
-continuous and discrete to `numeric` and `integer` respectively.
-
-```{r}
-for (j in c(nomVars, ordVars)) full[[j]] <- as.factor(full[[j]])
-for (j in discVars) full[[j]] <- as.integer(full[[j]])
+for (j in c(nomVars, ordVars, discVars)) full[[j]] <- as.factor(full[[j]])
 for (j in contVars) full[[j]] <- as.numeric(full[[j]])
-```
 
-Ordinal variable levels are corrected.
-
-```{r}
+# order levels
 lvlOrd <- list(
   LotShape = c("Reg", "IR1", "IR2", "IR3"),
   Utilities = c("AllPub", "NoSewr", "NoSeWa", "ELO"),
@@ -133,7 +121,187 @@ lvlOrd <- list(
 for (j in names(lvlOrd)) {
   full[[j]] <- factor(full[[j]], levels = lvlOrd[[j]])
 }
+
+# undefined values
+full[BsmtCond == "noBasement" & is.na(BsmtUnfSF), BsmtUnfSF := 0]
+full[BsmtCond == "noBasement" & is.na(TotalBsmtSF), TotalBsmtSF := 0]
+full[BsmtFinType1 == "noBasement" & is.na(BsmtFinSF1), BsmtFinSF1 := 0]
+full[BsmtFinType2 == "noBasement" & is.na(BsmtFinSF2), BsmtFinSF2 := 0]
+full[GarageType == "noGarage" & is.na(GarageYrBlt), GarageYrBlt := "0"]
+full[GarageType == "noGarage" & is.na(GarageCars), GarageCars := "0"]
+full[GarageType == "noGarage" & is.na(GarageArea), GarageArea := 0]
+full[PoolQC == "noPool" & is.na(PoolArea), PoolArea := 0]
+full[MiscFeature == "noFeature" & is.na(MiscVal), MiscVal := 0]
 ```
+
+**Missing Values**
+
+```{r, results='hide'}
+# single imputation
+full[c(949, 1488, 2349), BsmtExposure := "No"]
+full[c(2041, 2186, 2525), BsmtCond := "TA"]
+full[c(2218, 2219), BsmtQual := "TA"]
+full[c(2127, 2577), GarageYrBlt := "0"]
+full[c(2127, 2577), GarageCars := "0"]
+full[c(2127, 2577), GarageArea := 0]
+full[c(2127, 2577), GarageType := "noGarage"]
+full[is.na(Exterior1st), Exterior1st := "VinylSd"]
+full[is.na(Exterior2nd), Exterior2nd := "VinylSd"]
+full[is.na(Electrical), Electrical := "SBrkr"]
+full[is.na(KitchenQual), KitchenQual := "TA"]
+full[is.na(SaleType), SaleType := "WD"]
+full[is.na(Utilities), Utilities := "AllPub"]
+full[is.na(Functional), Functional := "Typ"]
+full[is.na(MSZoning), MSZoning := "RL"]
+full[is.na(MasVnrArea), MasVnrArea := 202]
+full[is.na(MasVnrType), MasVnrType := "none"]
+full[is.na(BsmtFullBath), BsmtFullBath := "0"]
+full[is.na(BsmtHalfBath), BsmtHalfBath := "0"]
+
+# multiple imputation
+vars <- c(contVars, "BldgType", "MSSubClass", "BedroomAbvGr", "TotRmsAbvGrd")
+imp <- mice(full[, vars, with = FALSE], seed = 42)
+full$BldgType <- complete(imp)$BldgType
+full$LotFrontage <- complete(imp)$LotFrontage
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+# Model
+
+```{r}
+train <- full[label == "train", !"label"]
+test <- full[label == "test", !c("label", "SalePrice")]
+X <- train[, !"SalePrice"]
+Y <- train$SalePrice
+```
+
+```{r}
+lY <- log(Y)
+```
+
+Loss function
+
+```{r}
+L <- function(lY, lYh) sqrt((lY - lYh)^2 / length(lY))
+```
+
+
+## asd
+
+```{r}
+predMARS <- function(trainX, trainY, testX, testY, lg = TRUE, ...) {
+  # train and test
+  fit <- earth(trainX, trainY, nk = 200, ...)
+  pred <- predict(fit, newdata = testX)
+  
+  # log result
+  if (lg) {
+    lYh <- log(pred[, 1])
+    lY <- log(testY)
+  } else {
+    lYh <- pred[, 1]
+    lY <- testY
+  }
+  
+  # get RMSE
+  return(L(lY, lYh))
+}
+```
+
+
+
+
+
+```{r}
+
+CV <- crossval(predMARS, X, Y, verbose = FALSE, K = 3, B = 5)
+
+
+fit <- earth(X, Y) # additive model
+fit
+plot(fit)
+evimp(fit)[1:10, ]
+
+
+fit <- earth(X, lY, degree = 2, nk = 200) # interactions
+fit
+plot(fit)
+evimp(fit)[1:10, ]
+
+fit <- earth(X, Y, degree = 2, nk = 200, fast.k = 0) # Fast MARS ausschalten
+fit
+plot(fit)
+evimp(fit)[1:10, ]
+
+fit <- earth(X, Y, degree = 2, nk = 200, pmethod = "cv", nfold = 5, ncross = 3) # Pruning durch CV
+fit
+plot(fit)
+evimp(fit)[1:10, ]
+
+
+pred <- predict(fit, newdata = train)
+fit
+
+crossval
+
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

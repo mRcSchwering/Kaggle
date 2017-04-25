@@ -71,6 +71,7 @@ The datasets are combined.
 N^(1/p)
 test$SalePrice <- NaN
 full <- rbind(train, test)
+full$label <- rep(c("train", "test"), c(nrow(train), nrow(test)))
 ```
 
 ## Feature Attributes
@@ -122,7 +123,6 @@ These values are replaced with more descriptive `chr` strings.
 Before, test and train set are combined.
 
 ```{r, results='hide', message=FALSE}
-full$label <- rep(c("train", "test"), c(nrow(test), nrow(train)))
 full[is.na(Alley), Alley := "noAccess"]
 full[is.na(BsmtQual), BsmtQual := "noBasement"]
 full[is.na(BsmtCond), BsmtCond := "noBasement"]
