@@ -62,7 +62,7 @@ train <- data.table(train)
 
 # Data Quality
 
-The number of dimensions and density of the input matrix is calculated.
+The number of dimensions and sampling density is calculated.
 The datasets are combined.
 
 ```{r}
@@ -205,30 +205,47 @@ $$
 For the garage and basement features there are several features which indicate
 the absence of that feature.
 If one of them indicates the absence of a feature, the others should too.
+This can be tested with the difference between two sets.
 
 ```{r}
-setdiff(which(full$BsmtCond == "noBasement"),
+outersect <- function(x, y) sort(c(setdiff(x, y), setdiff(y, x)))
+```
+
+The differences between Ids of observations with *noBasement* are computed.
+
+```{r}
+outersect(which(full$BsmtCond == "noBasement"),
           which(full$BsmtExposure == "noBasement"))
-setdiff(which(full$BsmtCond == "noBasement"),
+outersect(which(full$BsmtCond == "noBasement"),
           which(full$BsmtQual == "noBasement"))
-full[c(2041, 2186, 2525), .(Id, BsmtCond, BsmtExposure, BsmtQual, 
-                            BsmtUnfSF, TotalBsmtSF)]
+full[c(949, 1488, 2041, 2186, 2218, 2219, 2349, 2525), 
+     .(Id, BsmtCond, BsmtExposure, BsmtQual, BsmtUnfSF, TotalBsmtSF)]
 ```
 
 So here the *data_description* is not consistent.
 The general condition is set to *noBasement* but there are values
 for basement exposure, quality, and so on.
+*noBasement* was translated from *NA*s.
+Since for all the other basement related variables there are reasonable values
+it might be that in these cases *NA* did not mean *noBasement*.
+
+The same can be done for the garage related variables.
 
 ```{r}
-setdiff(which(full$GarageType == "noGarage"),
+outersect(which(full$GarageType == "noGarage"),
           which(full$GarageFinish == "noGarage"))
-setdiff(which(full$GarageType == "noGarage"),
+outersect(which(full$GarageType == "noGarage"),
           which(full$GarageQual == "noGarage"))
-setdiff(which(full$GarageType == "noGarage"),
+outersect(which(full$GarageType == "noGarage"),
           which(full$GarageCond == "noGarage"))
+full[c(2127, 2577), 
+     .(GarageYrBlt, GarageCars, GarageArea, GarageType, 
+       GarageFinish, GarageQual, GarageCond)]
 ```
 
-The garage features doesn't have these inconsistencies.
+Here, most garage related features were missing.
+
+
 
 **Mark Undefined Variables**
 
@@ -394,7 +411,7 @@ but this might be because there are not many total values for these variables.
 Many supposably continuous variables have a quite low cardinality.
 
 ```{r}
-DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
+DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>% 
   formatStyle('relDelta', 
     color = styleInterval(c(0.2, 0.8), c('green', 'orange', 'red'))) %>%
   formatStyle('relCard', 
@@ -451,7 +468,7 @@ df$Mode <- apply(dt, 2, function(x) Mode(x)$value)
 df$ModeCount <- apply(dt, 2, function(x) Mode(x)$freq)
 df$Mode2nd <- apply(dt, 2, function(x) Mode(x, fst = FALSE)$value)
 df$ModeCount2nd <- apply(dt, 2, function(x) Mode(x, fst = FALSE)$freq)
-DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
+DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>% 
   formatStyle('ModeCount', 
     color = styleInterval(nrow(dt) / 2, c("black", 'orange')))
 ```
@@ -503,7 +520,7 @@ df <- data.frame(
   ModeCount2nd = apply(dt, 2, function(x) Mode(x, fst = FALSE)$freq),
   Type = rep(c("ord", "nom"), c(length(ordVars), length(nomVars)))
 )
-DT::datatable(df, options = list(dom = "t", pageLength = 40)) %>% 
+DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>% 
   formatStyle('Type', 
     color = styleEqual(unique(df$Type), c('orange', 'blue'))) %>% 
   formatStyle('ModeCount', 
@@ -613,48 +630,169 @@ plot(corrClust)
 
 # Imputation
 
-Featrues with missing values are.
+## Single Imputation
 
-```{r}
-# featAttr[missing > 0, ]
-```
-
-Imputation methods are defined.
-
-```{r}
-# featAttr$impMethod <- ""
-```
-
-Continuous variables should be imputed using predictive mean matching,
-binary variables using logistic regression,
-other discrete and ordinal variables using proportional odds,
-others using polytomous regression.
+Single missing values in basement related features, where all other
+basement related features did have a value,
+are replaced by their mode.
 
 ```{r, results='hide'}
-# featAttr[missing > 0, impMethod := "polyreg"]
-# featAttr[missing > 0 & type == "ordinal", impMethod := "polr"]
-# featAttr[missing > 0 & type == "discrete", impMethod := "polr"]
-# featAttr[missing > 0 & card == 2, impMethod := "logreg"]
-# featAttr[missing > 0 & type == "continuous", impMethod := "pmm"]
+full[c(949, 1488, 2349), BsmtExposure := "No"]
+full[c(2041, 2186, 2525), BsmtCond := "TA"]
+full[c(2218, 2219), BsmtQual := "TA"]
 ```
 
+For garage related features there are two cases with almost no
+non-missing value for garage.
+For these two cases the garage features are set to *noGarage*.
 
+```{r, results='hide'}
+full[c(2127, 2577), GarageYrBlt := "0"]
+full[c(2127, 2577), GarageCars := "0"]
+full[c(2127, 2577), GarageArea := 0]
+full[c(2127, 2577), GarageType := "noGarage"]
+```
+
+Features with only very few missing values will be imputed using the 
+mode for categories and the median for continuous variables.
+
+```{r, results='hide'}
+full[is.na(Exterior1st), Exterior1st := "VinylSd"]
+full[is.na(Exterior2nd), Exterior2nd := "VinylSd"]
+full[is.na(Electrical), Electrical := "SBrkr"]
+full[is.na(KitchenQual), KitchenQual := "TA"]
+full[is.na(SaleType), SaleType := "WD"]
+full[is.na(Utilities), Utilities := "AllPub"]
+full[is.na(Functional), Functional := "Typ"]
+full[is.na(MSZoning), MSZoning := "RL"]
+full[is.na(MasVnrArea), MasVnrArea := 202]
+full[is.na(MasVnrType), MasVnrType := "none"]
+```
+
+There were two observations with *NA* values for basement bath related variables
+in which all other basement related variables were set to *noBasement*.
+These will be set to zreo.
+
+```{r, results='hide'}
+full[is.na(BsmtFullBath), BsmtFullBath := "0"]
+full[is.na(BsmtHalfBath), BsmtHalfBath := "0"]
+```
+
+## Multiple Imputation
+
+*BldgType* and *LotFrontage* have around 10-15% missing values.
+These will be imputed by Gibbs sampling of the posterior distribution.
+Variables with missing values are repeatedly predicted given a set of predictor
+variables.
+For *LotFrontage* predictive mean matching, 
+and for *BldgType* polytomous regression will be used.
+As predictors all continuous variables and the the 3 categorical variables 
+which are most correlated to *BldgType* are included.
+Several datasets are created by this method but only one will be used.
+
+```{r, results='hide'}
+vars <- c(contVars, "BldgType", "MSSubClass", "BedroomAbvGr", "TotRmsAbvGrd")
+dt <- full[, vars, with = FALSE]
+imp <- mice(dt, seed = 42)
+```
+
+**LotFrontage**
+
+The distribution of *LotFrontage* after imputation is compared to the 
+original distribution.
+
+```{r, warning=FALSE}
+df <- data.frame(
+  LotFrontage = c(dt$LotFrontage, complete(imp)$LotFrontage),
+  Distro = rep(c("Original", "Imputed"), each = nrow(dt))
+)
+ggplot(df, aes(x = LotFrontage, color = Distro)) +
+  geom_density() +
+  theme_bw()
+```
+
+Both distributions look very similar.
+Furthermore, its correlation with the 4 most correlated continuous variables
+is compared.
 
 ```{r}
-# imp <- mice(full, method = c("", featAttr$impMethod, ""))
-# imp <- mice(full)
+df <- data.frame(
+  Value = c(dt$LotArea, dt$MasVnrArea, dt$GrLivArea, dt$GarageArea),
+  Variable = rep(c("LotArea", "MasVnrArea", "GrLivArea", "GarageArea"), 
+                 each = nrow(dt)),
+  LotFrontage = rep(complete(imp)$LotFrontage, each = 4),
+  isImputed = factor(is.na(dt$LotFrontage), levels = c(TRUE, FALSE))
+)
+ggplot(df, aes(x = LotFrontage, y = Value, color = isImputed))  +
+  geom_point(size = .7) +
+  facet_wrap( ~ Variable, scales = "free") +
+  theme_bw()
 ```
 
+Imputed values seem to resemble the shape of the original data.
 
+**BldgType**
+
+Imputed and original distributions are compared.
+
+```{r, warning=FALSE, warning=FALSE}
+df <- data.frame(
+  BldgType = c(as.character(dt$BldgType), as.character(complete(imp)$BldgType)),
+  Distro = rep(c("Original", "Imputed"), each = nrow(dt))
+)
+ggplot(df, aes(x = BldgType, fill = Distro)) +
+  geom_bar(position = "dodge") +
+  scale_x_discrete() +
+  theme_bw()
+```
+
+Next correlation to the closest correlated categorical feature *MSSubClass*
+before and after imputation is checked.
 
 ```{r}
-# imp <- mice(full[, .(Utilities)])
-# str(full)
-# unique(full$Utilities)
-# 
-# imp <- mice(full, seed = 42)
-# ?mice
-# 
-
+df <- data.frame(
+  BldgType = c(as.character(dt$BldgType), as.character(complete(imp)$BldgType)),
+  MSSubClass = rep(dt$MSSubClass, 2),
+  Distro = rep(c("Original", "Imputed"), each = nrow(dt))
+)
+ggplot(df, aes(x = MSSubClass, fill = BldgType)) +
+  geom_bar(position = "dodge") +
+  facet_grid(Distro ~ .) +
+  theme_bw()
 ```
+
+**Both**
+
+Finally, the correlation of both imputed variables is checked.
+
+```{r}
+df <- data.frame(
+  LotFrontage = rep(c(dt$LotFrontage, complete(imp)$LotFrontage), each = 2),
+  BldgType = rep(c(as.character(dt$BldgType), 
+                   as.character(complete(imp)$BldgType)), each = 2),
+  Distro = rep(c("Original", "Imputed"), each = 2*nrow(dt))
+)
+ggplot(df, aes(x = LotFrontage, color = BldgType)) +
+  geom_density() +
+  facet_grid(Distro ~ .) +
+  theme_bw()
+```
+
+The distribution of $BldgType = TwnhsE$ changed visibly.
+However, with less than 10% this value is quite underrepresented
+so its distribution estimate is less stable.
+All in all the imputed values seem to be useful
+
+
+
+
+
+
+
+
+
+
+***
+
+
 
