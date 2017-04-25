@@ -20,7 +20,7 @@ output:
 
 
 
-# Preparation
+# Pre-Processing
 
 The following steps prepare the dataset for the modeling part.
 The actual feature analysis was done in another kernel.
@@ -191,7 +191,13 @@ full$LotFrontage <- complete(imp)$LotFrontage
 
 
 
-# Model
+# Modeling
+
+
+
+## Preparation
+
+The dataset is split back into training and test.
 
 ```{r}
 train <- full[label == "train", !"label"]
@@ -200,92 +206,206 @@ X <- train[, !"SalePrice"]
 Y <- train$SalePrice
 ```
 
+The target variable is log-transformed.
+During *Feature Exploration* continuous variables showed a broader spread
+when log10 transformed.
+Therefore a second input matrix with log10 transformed continuous variables
+is created.
+
 ```{r}
 lY <- log(Y)
-```
-
-Loss function
-
-```{r}
-L <- function(lY, lYh) sqrt((lY - lYh)^2 / length(lY))
-```
-
-
-## asd
-
-```{r}
-predMARS <- function(trainX, trainY, testX, testY, lg = TRUE, ...) {
-  # train and test
-  fit <- earth(trainX, trainY, nk = 200, ...)
-  pred <- predict(fit, newdata = testX)
-  
-  # log result
-  if (lg) {
-    lYh <- log(pred[, 1])
-    lY <- log(testY)
-  } else {
-    lYh <- pred[, 1]
-    lY <- testY
-  }
-  
-  # get RMSE
-  return(L(lY, lYh))
+lX <- X
+for (j in contVars) {
+  lX[[j]] <- log10(lX[[j]] + 1)
 }
 ```
 
 
 
+## Training
 
+In general the forward pass should create a model of sufficiently high
+complexity.
+The pruning step should then simplify the model again to reduce overfitting.
+During the forward pass there are a few conditions which define when the
+model has reached a high enough complexity.
+Two of them are a maximum number of terms and a threshold in residual sum of
+squares gain (*RSS*).
+Here, the maximum number of terms is always set very high (200).
+Thereby, the forward pass only stops when no increase in *RSS* by more than
+0.001 is gained.
+
+The models performance on the training dataset can be read mainly from
+the $R^2$ (*RSq*) and generalized $R^2$ (*GRSq*).
+In *GRSq* there is a penalty for model complexity which is estimated by
+the number of terms, knots and interactions in the model.
+Furthermore residual and quantile-quantile plots, 
+and cummulative distributions of residuals
+can be used to see the model's performance.
+
+The maximum *GRSq* value is also used for finding an appropriate model size
+during the pruning step.
+Instead of using the *GRSq*, a cross-validation estimated $R^2$ can be used
+as well.
+However, this is computationally too expensive for this kernel.
+*GRSq* usually finds roughly the same model size anyway.
+
+**Additive**
+
+First, an additive model of hinge functions is created by not allowing
+interaction terms.
 
 ```{r}
+fit.Add <- earth(X, lY, nk = 200)
+fit.Add
+plot(fit.Add)
+```
 
-CV <- crossval(predMARS, X, Y, verbose = FALSE, K = 3, B = 5)
+**Additive + log X**
+
+First, an additive model of hinge functions is created by not allowing
+interaction terms.
+
+```{r}
+fit.lAdd <- earth(lX, lY, nk = 200)
+fit.lAdd
+plot(fit.lAdd)
+```
+
+**Interaction**
+
+Next, 2nd degree interaction terms are allowed.
+
+```{r}
+fit.lInt <- earth(X, lY, nk = 200, degree = 2)
+fit.lInt
+plot(fit.lInt)
+```
+
+**Interaction + log X**
+
+Feature exploration suggested log10 transformed continuous variables
+which are used here.
+
+```{r}
+fit.lInt <- earth(lX, lY, nk = 200, degree = 2)
+fit.lInt
+plot(fit.lInt)
+```
+
+**Interaction + log X + Penalty 2**
+
+Here, the penalty for adding a new term during the forward pass is reduced.
+This can increase the complexity of the model
+but it can also lead to overfitting.
+
+```{r}
+fit.lIntP2 <- earth(lX, lY, nk = 200, degree = 2, penalty = 2)
+fit.lIntP2
+plot(fit.lIntP2)
+```
+
+**Interaction + log X + no Outliers**
+
+As indicated the the previous plots there are 3 outlier values (31, 463, 633).
+They all actually look quite separated from the rest.
+It might be a good idea to exclude them during training.
+
+```{r}
+lXr <- lX[-c(31, 463, 633), ]
+lYr <- lY[-c(31, 463, 633)]
+fit.lIntr <- earth(lXr, lYr, nk = 200, degree = 2)
+fit.lIntr
+plot(fit.lIntr)
+```
+
+**Interaction + log X + Penalty 2 + no Outliers**
+
+These outliers might have also influenced the model with reduced penalty.
+Therefore, this model is trained again without these outliers.
+
+```{r}
+fit.lIntP2r <- earth(lXr, lYr, nk = 200, degree = 2, penalty = 2)
+fit.lIntP2r
+plot(fit.lIntP2r)
+```
 
 
-fit <- earth(X, Y) # additive model
-fit
-plot(fit)
-evimp(fit)[1:10, ]
+## Error Estimation
 
+Eventually, the error of the learning procedure has to be estimated.
+This will be done using cross validation.
+With error the root-mean-squared-error (RMSE) of the log of the target variable
+is defined by the Kaggle competition guidelines.
 
-fit <- earth(X, lY, degree = 2, nk = 200) # interactions
-fit
-plot(fit)
-evimp(fit)[1:10, ]
+```{r}
+L <- function(lY, lYh) sqrt(sum((lY - lYh)^2) / length(lY))
+```
 
-fit <- earth(X, Y, degree = 2, nk = 200, fast.k = 0) # Fast MARS ausschalten
-fit
-plot(fit)
-evimp(fit)[1:10, ]
+Inside the cross validation a prediction function will
+train a MARS model on one part of the training set 
+and then predict the other.
+The RMSE for the prediction will be returned.
 
-fit <- earth(X, Y, degree = 2, nk = 200, pmethod = "cv", nfold = 5, ncross = 3) # Pruning durch CV
-fit
-plot(fit)
-evimp(fit)[1:10, ]
+```{r}
+predMARS <- function(trainX, trainY, testX, testY, ...) {
+  fit <- earth(trainX, trainY, nk = 200, ...)
+  pred <- predict(fit, newdata = testX)
+  return(L(testY, pred[, 1]))
+}
+```
 
+Splitting of the data and execution of the prediction function is performed
+by `crossval`.
+For each model it will repeat a 5-fold cross validation 5 times.
+The resulting mean RMSE and its standard error are stored in a list.
 
-pred <- predict(fit, newdata = train)
-fit
+```{r}
+CV <- list()
+CV$Add <- crossval(predMARS, X, lY, verbose = FALSE, K = 5, B = 5)
+#CV$Addr <- crossval(predMARS, Xr, lYr, verbose = FALSE, K = 5, B = 5)
+CV$lAdd <- crossval(predMARS, lX, lY, verbose = FALSE, K = 5, B = 5)
+CV$lAddr <- crossval(predMARS, lXr, lYr, verbose = FALSE, K = 5, B = 5)
+CV$Int <- crossval(predMARS, X, lY, degree = 2, verbose = FALSE, K = 5, B = 5)
+CV$lInt <- crossval(predMARS, lX, lY, degree = 2, verbose = FALSE, K = 5, B = 5)
+CV$lIntP2 <- crossval(predMARS, lX, lY, degree = 2, penalty = 2, 
+                      verbose = FALSE, K = 5, B = 5)
+CV$lIntr <- crossval(predMARS, lXr, lYr, degree = 2, 
+                     verbose = FALSE, K = 5, B = 5)
+CV$lIntP2r <- crossval(predMARS, lXr, lYr, degree = 2, penalty = 2, 
+                      verbose = FALSE, K = 5, B = 5)
+```
 
-crossval
+Estimated RMSEs for all models are shown below.
 
-
-
-
-
-
-
-
-
-
-
-
+```{r}
+l <- lapply(CV, function(i) data.frame(RMSE = i$stat, se = i$stat.se))
+res <- do.call(rbind, l)
+res$Model <- rownames(res)
+ggplot(res, aes(x = Model, y = RMSE)) +
+  geom_pointrange(aes(ymax = RMSE + se, ymin = RMSE - se), color = "blue") +
+  coord_flip() +
+  ggtitle("CV-Estimated RMSE with Standard Error") +
+  theme_classic()
 ```
 
 
 
 
 
+
+## Final Model
+
+```{r}
+summary(fit.Add, decomp = "none")
+
+evimp(fit.Add)[1:10, ]
+
+plotmo(fit.Add)
+
+
+
+```
 
 
 
