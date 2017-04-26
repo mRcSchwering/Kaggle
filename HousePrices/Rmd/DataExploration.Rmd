@@ -33,7 +33,8 @@ library(highcharter) # interactive plots
 library(DT) # display tables
 library(corrplot) # corr SPLOMs
 library(vcd) # stats for categories
-library(mice) # for imputation
+library(mice) # multiple imputation
+library(Boruta) # estimate variable importance
 ```
 
 Input is loaded and covnerted to `data.table`.
@@ -139,12 +140,15 @@ full[is.na(Fence), Fence := "noFence"]
 full[is.na(MiscFeature), MiscFeature := "none"]
 ```
 
-Nominal, ordinal, and discrete variables are converted to `factor`,
+Nominal, and ordinal variables are converted to `factor`,
 continuous to `numeric`.
+Discrete variables contain years and measures like number of cars
+so they will be converted to `integer`.
 
 ```{r}
-for (j in c(nomVars, ordVars, discVars)) full[[j]] <- as.factor(full[[j]])
+for (j in c(nomVars, ordVars)) full[[j]] <- as.factor(full[[j]])
 for (j in contVars) full[[j]] <- as.numeric(full[[j]])
+for (j in discVars) full[[j]] <- as.integer(full[[j]])
 ```
 
 **Ordering**
@@ -246,7 +250,6 @@ full[c(2127, 2577),
 Here, most garage related features were missing.
 
 
-
 **Mark Undefined Variables**
 
 If e.g. *PoolQC* is *noPool*, then there should be a missing vlaue or
@@ -260,8 +263,8 @@ full[BsmtCond == "noBasement" & is.na(BsmtUnfSF), BsmtUnfSF := 0]
 full[BsmtCond == "noBasement" & is.na(TotalBsmtSF), TotalBsmtSF := 0]
 full[BsmtFinType1 == "noBasement" & is.na(BsmtFinSF1), BsmtFinSF1 := 0]
 full[BsmtFinType2 == "noBasement" & is.na(BsmtFinSF2), BsmtFinSF2 := 0]
-full[GarageType == "noGarage" & is.na(GarageYrBlt), GarageYrBlt := "0"]
-full[GarageType == "noGarage" & is.na(GarageCars), GarageCars := "0"]
+full[GarageType == "noGarage" & is.na(GarageYrBlt), GarageYrBlt := 0]
+full[GarageType == "noGarage" & is.na(GarageCars), GarageCars := 0]
 full[GarageType == "noGarage" & is.na(GarageArea), GarageArea := 0]
 full[PoolQC == "noPool" & is.na(PoolArea), PoolArea := 0]
 full[MiscFeature == "noFeature" & is.na(MiscVal), MiscVal := 0]
@@ -272,9 +275,12 @@ full[MiscFeature == "noFeature" & is.na(MiscVal), MiscVal := 0]
 
 
 
+
+
+
 ## Missing Data
 
-$NA$ which are left must be true missing data.
+$NA$s which are left must be true missing data.
 
 ```{r}
 naFeats <- apply(full[, !"SalePrice"], 2, function(x) any(is.na(x)))
@@ -283,8 +289,7 @@ naObs <- apply(full[, !"SalePrice"], 1, function(x) any(is.na(x)))
 
 **Features**
 
-The total number of missing values per feature will be saved.
-The features with at least one missing value are shown below.
+The total number of missing values per feature are shown below.
 
 ```{r}
 total <- apply(full[, naFeats, with = FALSE], 2, function(j) sum(is.na(j)))
@@ -363,9 +368,32 @@ Feature distributions are described for each type of variable separately.
 
 ### Continuous Variables
 
-Values were log10 transformed to better capture their spread.
-There are many zeros, partly because of the dependency to another variable.
-These zeros are excluded during the transformation.
+Continuous variables are very much skewed towards zero.
+Partly because there are many zeros, partly because they are log-normal
+distributed.
+Here, they are log10 transformed to better capture the spread.
+(log10 because it's nicer to interpret than log)
+A new table `full2` will hold the transformed values.
+
+```{r}
+full2 <- full
+for (j in contVars) {
+  full2[[j]] <- log10(full[[j]] + 1)
+}
+```
+
+Their distributions are shown below.
+
+```{r, fig.width=10, fig.height=8, warning=FALSE}
+dt <- melt(full2, "Id", contVars)
+ggplot(dt, aes(x = value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ variable, scale = "free") +
+  theme_bw()
+```
+
+Some distributions are not visible because of all the zeros.
+The next plot shows the same, excluding zeros.
 
 ```{r, fig.width=10, fig.height=8, warning=FALSE}
 dt <- melt(full, "Id", contVars)
@@ -378,11 +406,11 @@ ggplot(dt, aes(x = value)) +
 
 Summaries for each distribution are computed.
 There are many undefined variables which are set to zero.
-This influences the description a lot.
+This influences the description a lot and is not of particular interest.
 Therefore, they are excluded.
 
 ```{r}
-dt <- full[, contVars, with = FALSE]
+dt <- full2[, contVars, with = FALSE]
 df <- data.frame(
   Min = apply(dt, 2, function(x) min(x[x > 0], na.rm = TRUE)),
   Mean = apply(dt, 2, function(x) mean(x[x > 0], na.rm = TRUE)),
@@ -406,9 +434,9 @@ df$relOut <- apply(dt, 2, function(x) {
 })
 ```
 
-*PoolArea* and *MiscVal* show a high proportion of outliers,
-but this might be because there are not many total values for these variables.
-Many supposably continuous variables have a quite low cardinality.
+Below is a summary table.
+There are some outliers for *PoolArea* but this is because most values in this
+variable are zero.
 
 ```{r}
 DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>% 
@@ -418,35 +446,37 @@ DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>%
     color = styleInterval(c(0.2, 0.6), c('red', 'orange', 'green'))) %>%
   formatStyle('relOut', 
     color = styleInterval(c(0.05, 0.1), c('green', 'orange', 'red'))) %>%
-  formatRound(c(2, 5:7), 3)
+  formatRound(1:7, 3)
 ```
 
 
 ### Discrete Variables
 
-Distributions are shown below.
+Discrete variables contain years and numerical measures.
+They are treated as continuous here.
 
 ```{r, fig.width=10, fig.height=10, warning=FALSE}
 dt <- melt(full, "Id", discVars)
 ggplot(dt, aes(x = value)) +
-  geom_bar() +
-  facet_wrap(~ variable, scales = "free") +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ variable, scale = "free") +
   theme_bw()
 ```
 
-As summary, the value range, and cardinality are computed.
+A summary, as above is computed.
 
 ```{r}
 dt <- full[, discVars, with = FALSE]
 df <- data.frame(
-  Card = apply(dt, 2, function(x) length(unique(x[!is.na(x)]))),
-  Min = apply(dt, 2, function(x) min(as.numeric(as.character(x)), na.rm = TRUE)),
-  Max = apply(dt, 2, function(x) max(as.numeric(as.character(x)), na.rm = TRUE))
+  Min = apply(dt, 2, function(x) min(x[x > 0], na.rm = TRUE)),
+  Mean = apply(dt, 2, function(x) mean(x[x > 0], na.rm = TRUE)),
+  Median = apply(dt, 2, function(x) median(x[x > 0], na.rm = TRUE)),
+  Max = apply(dt, 2, function(x) max(x[x > 0], na.rm = TRUE))
 )
 ```
 
-Apart from that, the modes are usually interesting.
-For this a function has to be defined first.
+Skewness and cardinality would be less interesting here.
+Instead the modes will be extracted.
 
 ```{r}
 Mode <- function(x, fst = TRUE) {
@@ -470,7 +500,8 @@ df$Mode2nd <- apply(dt, 2, function(x) Mode(x, fst = FALSE)$value)
 df$ModeCount2nd <- apply(dt, 2, function(x) Mode(x, fst = FALSE)$freq)
 DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>% 
   formatStyle('ModeCount', 
-    color = styleInterval(nrow(dt) / 2, c("black", 'orange')))
+    color = styleInterval(nrow(dt) / 2, c("black", 'orange'))) %>%
+  formatRound(2, 0)
 ```
 
 In *GarageYrBlt* the maximum value is 2207, which does not make sense.
@@ -479,7 +510,7 @@ After checking that there are not more values above 2010
 2207 is changed to 2007.
 
 ```{r, results='hide'}
-full[GarageYrBlt == 2207, GarageYrBlt := "2007"]
+full[GarageYrBlt == 2207, GarageYrBlt := 2007]
 ```
 
 
@@ -533,7 +564,7 @@ DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>%
 
 ## Correlations between Features
 
-### Continuous
+### Continuous and Discrete
 
 ```{r}
 vars <- c(contVars, discVars)
@@ -544,10 +575,11 @@ where both features are continuous.
 The results are shown as heatmap below.
 Using euclidean distance of the correlation matrix as a metric 
 rows and columns were hierarchically ordered (complete link).
+Here, the log10 transformed values are used.
 
 ```{r, fig.width=10, fig.height=10}
 m <- cor(
-  full[, contVars, with = FALSE],
+  full2[, vars, with = FALSE],
   use = "complete.obs"
 )
 corrplot(m, method = "color", order = "hclust")
@@ -564,10 +596,8 @@ plot(corrClust)
 
 ### Categorical
 
-Here, discrete variables are included.
-
 ```{r}
-vars <- c(discVars, ordVars, nomVars)
+vars <- c(ordVars, nomVars)
 ```
 
 For categorical features Cramer's V is calculated for all feature pairs
@@ -590,7 +620,7 @@ for (i in seq_len(ncol(m))) {
 Using euclidean distance of the correlation matrix as a metric 
 rows and columns were hierarchically ordered (complete link).
 
-```{r}
+```{r, fig.width=10, fig.height=10, warning=FALSE}
 colnames(mCramer) <- colnames(m)
 rownames(mCramer) <- colnames(m)
 corrplot(mCramer, method = "color", order = "hclust")
@@ -604,6 +634,48 @@ plot(corrClust)
 ```
 
 
+### Continuous, Discrete, Ordinal
+
+Ordinal variable levels were ordered before.
+Here, they are converted to integer and then treated as continuous.
+
+```{r}
+for (j in ordVars) {
+  full2[[j]] <- as.integer(full2[[j]])
+}
+```
+
+Except for 1 non-missing observation *Utilities* consists of only one 
+value with *NoSeWa*.
+The rest is *AllPub*.
+Correlation cannot be calculated with this.
+It will be therefore be excldued here.
+
+```{r}
+vars <- c(contVars, discVars, ordVars)
+vars <- vars[!vars == "Utilities"]
+```
+
+Now they are compared to continuous and discrete variables.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+m <- cor(
+  full2[, vars, with = FALSE],
+  use = "complete.obs"
+)
+corrplot(m, method = "color", order = "hclust")
+```
+
+```{r}
+corrClust <- hclust(dist(m))
+plot(corrClust)
+```
+
+
+
+
+
+
 
 
 
@@ -614,6 +686,10 @@ plot(corrClust)
 
 
 ***
+
+
+
+
 
 
 
@@ -647,8 +723,8 @@ non-missing value for garage.
 For these two cases the garage features are set to *noGarage*.
 
 ```{r, results='hide'}
-full[c(2127, 2577), GarageYrBlt := "0"]
-full[c(2127, 2577), GarageCars := "0"]
+full[c(2127, 2577), GarageYrBlt := 0]
+full[c(2127, 2577), GarageCars := 0]
 full[c(2127, 2577), GarageArea := 0]
 full[c(2127, 2577), GarageType := "noGarage"]
 ```
@@ -674,8 +750,8 @@ in which all other basement related variables were set to *noBasement*.
 These will be set to zreo.
 
 ```{r, results='hide'}
-full[is.na(BsmtFullBath), BsmtFullBath := "0"]
-full[is.na(BsmtHalfBath), BsmtHalfBath := "0"]
+full[is.na(BsmtFullBath), BsmtFullBath := 0]
+full[is.na(BsmtHalfBath), BsmtHalfBath := 0]
 ```
 
 ## Multiple Imputation
@@ -686,13 +762,23 @@ Variables with missing values are repeatedly predicted given a set of predictor
 variables.
 For *LotFrontage* predictive mean matching, 
 and for *BldgType* polytomous regression will be used.
-As predictors all continuous variables and the the 3 categorical variables 
+As predictors all continuous and discrete variables, 
+and the the 2 categorical variables 
 which are most correlated to *BldgType* are included.
 Several datasets are created by this method but only one will be used.
 
+```{r}
+vars <- c(contVars, discVars, "BldgType", "MSSubClass", "HouseStyle")
+```
+
+The transformed values will be used.
+
 ```{r, results='hide'}
-vars <- c(contVars, "BldgType", "MSSubClass", "BedroomAbvGr", "TotRmsAbvGrd")
-dt <- full[, vars, with = FALSE]
+full2 <- full
+for (j in contVars) {
+  full2[[j]] <- log10(full2[[j]] + 1)
+}
+dt <- full2[, vars, with = FALSE]
 imp <- mice(dt, seed = 42)
 ```
 
@@ -717,8 +803,8 @@ is compared.
 
 ```{r}
 df <- data.frame(
-  Value = c(dt$LotArea, dt$MasVnrArea, dt$GrLivArea, dt$GarageArea),
-  Variable = rep(c("LotArea", "MasVnrArea", "GrLivArea", "GarageArea"), 
+  Value = c(dt$LotArea, dt$X1stFlrSF, dt$GrLivArea, dt$MasVnrArea),
+  Variable = rep(c("LotArea", "X1stFlrSF", "GrLivArea", "MasVnrArea"), 
                  each = nrow(dt)),
   LotFrontage = rep(complete(imp)$LotFrontage, each = 4),
   isImputed = factor(is.na(dt$LotFrontage), levels = c(TRUE, FALSE))
@@ -783,6 +869,15 @@ However, with less than 10% this value is quite underrepresented
 so its distribution estimate is less stable.
 All in all the imputed values seem to be useful
 
+```{r}
+full2$LotFrontage <- complete(imp)$LotFrontage
+full2$BldgType <- complete(imp)$BldgType
+```
+
+
+
+
+
 
 
 
@@ -796,3 +891,152 @@ All in all the imputed values seem to be useful
 
 
 
+
+
+
+
+
+
+
+
+
+
+# Feature Importance
+
+With many features is might be useful to have an idea about the importance
+of each feature in order to perform a feature selection.
+
+## Target Variable
+
+Here, the correlation of each feature to the target variable is visualized.
+
+```{r}
+train <- full2[label == "train", !"label"]
+```
+
+As suggested by the dataset description, the target variable is 
+log-normal distributed.
+
+```{r}
+summary(train$SalePrice)
+ggplot(train, aes(x = SalePrice)) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(trans = "log10") +
+  theme_bw()
+```
+
+**Continuous Variables**
+
+The plots below visualize the correlatio between continuous variables and the
+target.
+The y axis is fixed to enable comparison between the variables.
+Visually *X1stFlrSF* and *GrLivArea*seem to be important.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+vars <- contVars
+dt <- melt(train, "Id", vars)
+dt$SalePrice <- rep(train$SalePrice, length(vars))
+ggplot(dt, aes(y = SalePrice, x = value)) +
+  geom_point(size = .5) +
+  scale_y_continuous(trans = "log10") +
+  facet_wrap(~ variable, scales = "free_x") +
+  theme_bw()
+```
+
+**Discrete Variables**
+
+Here *YearBuilt*, *YearRemodAdd*, *GarageYrBlt*, *TotRmsAbvGrd*,
+and *FullBath* seem important.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+vars <- discVars
+dt <- melt(train, "Id", vars)
+dt$SalePrice <- rep(train$SalePrice, length(vars))
+ggplot(dt, aes(y = SalePrice, x = as.factor(value))) +
+  geom_boxplot() +
+  scale_y_continuous(trans = "log10") +
+  facet_wrap(~ variable, scales = "free_x") +
+  theme_bw()
+```
+
+**Ordinal Variables**
+
+Important features here are *OverallQualt*, *ExterQual*, *BsmtQual*,
+*KitchenQual*, basically the quality features.
+From these plots one could conclude that it does make sense to have these
+features numeric and not as a factor.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+vars <- ordVars
+dt <- melt(train, "Id", vars)
+dt$SalePrice <- rep(train$SalePrice, length(vars))
+ggplot(dt, aes(y = SalePrice, x = as.factor(value))) +
+  geom_boxplot() +
+  scale_y_continuous(trans = "log10") +
+  facet_wrap(~ variable, scales = "free_x") +
+  theme_bw()
+```
+
+**Nominal Variables**
+
+There are not many particularly intersting features here.
+It seems $MSZoning = C$ and $CentralAir = Y$ is interesting though.
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+vars <- nomVars
+dt <- melt(train, "Id", vars)
+dt$SalePrice <- rep(train$SalePrice, length(vars))
+ggplot(dt, aes(y = SalePrice, x = value)) +
+  geom_boxplot() +
+  scale_y_continuous(trans = "log10") +
+  facet_wrap(~ variable, scales = "free_x") +
+  theme_bw()
+```
+
+
+
+
+
+
+
+## Buruta
+
+This is a method which repeatedly fits random forest to the training set
+in order to estimate variable importance.
+Importance here are Z-scores, their significance is estimated by
+random permutations.
+Here, the package `boruta` is used according to 
+[Kursa and Rudnicki](https://www.jstatsoft.org/article/view/v036i11).
+The plot below shows confirmed, tentative and rejected variables
+in green, yellow, and red respectively.
+
+```{r}
+boruta <- Boruta(train[, -"SalePrice"], train$SalePrice, ntree = 500)
+plot(boruta)
+boruta
+```
+
+The table below summarizes the procedure.
+The variable with the highest median Z-score by far is
+*GrLivArea*, followed by *OverallQual*.
+
+```{r}
+df <- attStats(boruta)
+DT::datatable(df, options = list(dom = "ftp", pageLength = 20)) %>% 
+  formatStyle('decision', 
+    color = styleEqual(unique(df$decision), c('red', 'green', 'orange'))) %>% 
+  formatRound(1:5, 2)
+```
+
+
+***
+
+
+That's it!
+The modeling will be done in another kernel.
+Thanks for reading through this whole thing.
+
+
+
+
+***

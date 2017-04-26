@@ -1,0 +1,491 @@
+---
+title: "Housing Cri.. Prices"
+subtitle: "Model MARS"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+
+
+
+
+# Pre-Processing
+
+The following steps prepare the dataset for the modeling part.
+The actual feature analysis was done in another kernel.
+
+**Loading Data**
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(data.table) # database-like tables
+library(ggplot2) # general plots
+library(vcd) # stats for categories
+library(mice) # imputation
+library(earth) # MARS
+library(crossval) # doing CV
+test <- data.table(read.csv("../input/test.csv"))
+train <- data.table(read.csv("../input/train.csv"))
+test$SalePrice <- NaN
+full <- rbind(train, test)
+full$label <- rep(c("train", "test"), c(nrow(train), nrow(test)))
+```
+
+**Feature Attributes**
+
+```{r, results='hide'}
+# types
+nomVars <- c("MSZoning", "Street", "Alley", "LandContour", "LotConfig",
+             "Neighborhood", "Condition1", "Condition2", "HouseStyle",
+             "RoofStyle", "RoofMatl", "Exterior1st", "Exterior2nd",
+             "MasVnrType", "Foundation", "Heating", "CentralAir", "Electrical",
+             "GarageType", "PavedDrive", "MiscFeature", "SaleType",
+             "SaleCondition")
+ordVars <- c("MSSubClass", "LotShape", "Utilities", "LandSlope", "BldgType",
+             "OverallQual", "OverallCond", "ExterQual", "ExterCond", "BsmtQual",
+             "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2",
+             "HeatingQC", "KitchenQual", "Functional", "FireplaceQu",
+             "GarageFinish", "GarageQual", "GarageCond", "PoolQC", "Fence",
+             "MoSold")
+discVars <- c("YearBuilt", "YearRemodAdd", "BsmtFullBath", "BsmtHalfBath",
+              "FullBath", "HalfBath", "BedroomAbvGr", "KitchenAbvGr",
+              "TotRmsAbvGrd", "Fireplaces", "GarageYrBlt", "GarageCars",
+              "YrSold")
+contVars <- c("LotArea", "MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF",
+              "TotalBsmtSF", "X1stFlrSF", "X2ndFlrSF", "LowQualFinSF",
+              "GrLivArea", "GarageArea", "WoodDeckSF", "OpenPorchSF",
+              "EnclosedPorch", "X3SsnPorch", "ScreenPorch", "PoolArea",
+              "MiscVal", "LotFrontage")
+featAttr <- data.table(
+  name = colnames(test)[-1],
+  type = "nominal"
+)
+featAttr[name %in% ordVars, type := "ordinal"]
+featAttr[name %in% discVars, type := "discrete"]
+featAttr[name %in% contVars, type := "continuous"]
+
+# special values
+full[is.na(Alley), Alley := "noAccess"]
+full[is.na(BsmtQual), BsmtQual := "noBasement"]
+full[is.na(BsmtCond), BsmtCond := "noBasement"]
+full[is.na(BsmtExposure), BsmtExposure := "noBasement"]
+full[is.na(BsmtFinType1), BsmtFinType1 := "noBasement"]
+full[is.na(BsmtFinType2), BsmtFinType2 := "noBasement"]
+full[is.na(FireplaceQu), FireplaceQu := "noFireplace"]
+full[is.na(GarageType), GarageType := "noGarage"]
+full[is.na(GarageFinish), GarageFinish := "noGarage"]
+full[is.na(GarageQual), GarageQual := "noGarage"]
+full[is.na(GarageCond), GarageCond := "noGarage"]
+full[is.na(PoolQC) , PoolQC := "noPool"]
+full[is.na(Fence), Fence := "noFence"]
+full[is.na(MiscFeature), MiscFeature := "none"]
+full[GarageYrBlt == 2207, GarageYrBlt := 2007]
+
+# variable types
+for (j in c(nomVars, ordVars)) full[[j]] <- as.factor(full[[j]])
+for (j in contVars) full[[j]] <- as.numeric(full[[j]])
+for (j in discVars) full[[j]] <- as.integer(full[[j]])
+
+# order levels
+lvlOrd <- list(
+  LotShape = c("Reg", "IR1", "IR2", "IR3"),
+  Utilities = c("AllPub", "NoSewr", "NoSeWa", "ELO"),
+  LandSlope = c("Gtl", "Mod", "Sev"),
+  BldgType = c("1Fam", "2FmCon", "Duplx", "TwnhsE", "TwnhsI"),
+  OverallQual = 10:1,
+  OverallCond = 10:1,
+  ExterQual = c("Ex", "Gd", "TA", "Fa", "Po"),
+  ExterCond = c("Ex", "Gd", "TA", "Fa", "Po"),
+  BsmtQual = c("Ex", "Gd", "TA", "Fa", "Po", "noBasement"),
+  BsmtCond = c("Ex", "Gd", "TA", "Fa", "Po", "noBasement"),
+  BsmtExposure = c("Gd", "Av", "Mn", "No", "noBasement"),
+  BsmtFinType1 = c("GLQ", "ALQ", "BLQ", "Rec", "LwQ", "Unf", "noBasement"),
+  BsmtFinType2 = c("GLQ", "ALQ", "BLQ", "Rec", "LwQ", "Unf", "noBasement"),
+  HeatingQC = c("Ex", "Gd", "TA", "Fa", "Po"),
+  KitchenQual = c("Ex", "Gd", "TA", "Fa", "Po"),
+  Functional = c("Typ", "Min1", "Min2", "Mod", "Maj1", "Maj2", "Sev", "Sal"),
+  FireplaceQu = c("Ex", "Gd", "TA", "Fa", "Po", "noFireplace"),
+  GarageFinish = c("Fin", "RFn", "Unf", "noGarage"),
+  GarageQual = c("Ex", "Gd", "TA", "Fa", "Po", "noGarage"),
+  GarageCond = c("Ex", "Gd", "TA", "Fa", "Po", "noGarage"),
+  PoolQC = c("Ex", "Gd", "TA", "Fa", "noPool"),
+  Fence = c("GdPrv", "MnPrv", "GdWo", "MnWw", "noFence"),
+  MoSold = 1:12
+)
+for (j in names(lvlOrd)) {
+  full[[j]] <- factor(full[[j]], levels = lvlOrd[[j]])
+}
+
+# undefined values
+full[BsmtCond == "noBasement" & is.na(BsmtUnfSF), BsmtUnfSF := 0]
+full[BsmtCond == "noBasement" & is.na(TotalBsmtSF), TotalBsmtSF := 0]
+full[BsmtFinType1 == "noBasement" & is.na(BsmtFinSF1), BsmtFinSF1 := 0]
+full[BsmtFinType2 == "noBasement" & is.na(BsmtFinSF2), BsmtFinSF2 := 0]
+full[GarageType == "noGarage" & is.na(GarageYrBlt), GarageYrBlt := 0]
+full[GarageType == "noGarage" & is.na(GarageCars), GarageCars := 0]
+full[GarageType == "noGarage" & is.na(GarageArea), GarageArea := 0]
+full[PoolQC == "noPool" & is.na(PoolArea), PoolArea := 0]
+full[MiscFeature == "noFeature" & is.na(MiscVal), MiscVal := 0]
+```
+
+**Missing Values**
+
+```{r, results='hide'}
+# single imputation
+full[c(949, 1488, 2349), BsmtExposure := "No"]
+full[c(2041, 2186, 2525), BsmtCond := "TA"]
+full[c(2218, 2219), BsmtQual := "TA"]
+full[c(2127, 2577), GarageYrBlt := 0]
+full[c(2127, 2577), GarageCars := 0]
+full[c(2127, 2577), GarageArea := 0]
+full[c(2127, 2577), GarageType := "noGarage"]
+full[is.na(Exterior1st), Exterior1st := "VinylSd"]
+full[is.na(Exterior2nd), Exterior2nd := "VinylSd"]
+full[is.na(Electrical), Electrical := "SBrkr"]
+full[is.na(KitchenQual), KitchenQual := "TA"]
+full[is.na(SaleType), SaleType := "WD"]
+full[is.na(Utilities), Utilities := "AllPub"]
+full[is.na(Functional), Functional := "Typ"]
+full[is.na(MSZoning), MSZoning := "RL"]
+full[is.na(MasVnrArea), MasVnrArea := 202]
+full[is.na(MasVnrType), MasVnrType := "none"]
+full[is.na(BsmtFullBath), BsmtFullBath := 0]
+full[is.na(BsmtHalfBath), BsmtHalfBath := 0]
+
+# transform
+full$SalePrice <- log(full$SalePrice)
+for (j in contVars) {
+  full[[j]] <- log10(full[[j]] + 1)
+}
+
+# multiple imputation
+vars <- c(contVars, discVars, "BldgType", "MSSubClass", "HouseStyle")
+imp <- mice(full[, vars, with = FALSE], seed = 42)
+full$BldgType <- complete(imp)$BldgType
+full$LotFrontage <- complete(imp)$LotFrontage
+```
+
+**Important Features**
+
+```{r}
+impVars <- c("MSSubClass", "MSZoning", "LotFrontage", "LotArea", "LandContour", 
+              "Neighborhood", "BldgType", "HouseStyle", "OverallQual", 
+              "OverallCond", "YearBuilt", "YearRemodAdd", "Exterior1st", 
+              "Exterior2nd", "MasVnrArea", "ExterQual", "Foundation", 
+              "BsmtQual", "BsmtCond", "BsmtExposure", "BsmtFinType1", 
+              "BsmtFinSF1", "BsmtUnfSF", "TotalBsmtSF", "HeatingQC", 
+              "CentralAir", "X1stFlrSF", "X2ndFlrSF", "GrLivArea", 
+              "BsmtFullBath", "FullBath", "HalfBath", "BedroomAbvGr", 
+              "KitchenAbvGr", "KitchenQual", "TotRmsAbvGrd", "Fireplaces", 
+              "FireplaceQu", "GarageType", "GarageYrBlt", "GarageFinish", 
+              "GarageCars", "GarageArea", "GarageQual", "GarageCond", 
+              "PavedDrive", "WoodDeckSF", "OpenPorchSF")
+```
+
+**Adjust Features**
+
+```{r, results='hide'}
+# binary features
+full$noAccess <- full$Alley == "noAccess"
+full$noBasement <- full$BsmtQual == "noBasement" | full$BsmtCond == "noBasement"
+full$noFireplace <- full$FireplaceQu == "noFireplace"
+full$noGarage <- full$GarageType == "noGarage" | full$GarageCond == "noGarage"
+full$noPool <- full$PoolQC == "noPool"
+full$noFence <- full$Fence == "noFence"
+full$noMisc <- full$MiscFeature == "none"
+binVars <- c("noAccess", "noBasement", "noFireplace", "noGarage", 
+              "noPool", "noFence", "noMisc")
+
+# ordinal to integer
+for (j in ordVars) {
+  full[[j]] <- as.integer(full[[j]])
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+# Modeling
+
+
+
+## Preparation
+
+The dataset is split back into training and test.
+
+```{r}
+train <- full[label == "train", !"label"]
+test <- full[label == "test", !c("label", "SalePrice")]
+X <- train[, !"SalePrice"]
+Y <- train$SalePrice
+```
+
+Instead of using all features one could also use the set of features
+labelled important by the Boruta analysis.
+Then, the binary features could be added or removed from either set.
+
+```{r}
+Ximp <- X[, impVars, with = FALSE]
+Xsmall <- X[, c(impVars, binVars), with = FALSE]
+```
+
+## Training
+
+
+```{r}
+library(xgboost)
+
+
+# load data
+data(agaricus.train, package='xgboost')
+data(agaricus.test, package='xgboost')
+train <- agaricus.train
+test <- agaricus.test
+# fit model
+bst <- xgboost(data = train$data, label = train$label, max.depth = 1, eta = 1, nround = 3,
+               nthread = 2, objective = "binary:logistic")
+summary(bst)
+# predict
+pred <- predict(bst, test$data)
+
+# plot trees
+xgb.plot.tree(feature_names = agaricus.train$data@Dimnames[[2]], model = bst)
+xgb.plot.multi.trees(model = bst, feature_names = agaricus.train$data@Dimnames[[2]], features.keep = 3)
+
+# feature importance
+importance_matrix <- xgb.importance(agaricus.train$data@Dimnames[[2]], model = bst)
+xgb.plot.importance(importance_matrix)
+
+# depth of leaves
+xgb.plot.deepness(model = bst)
+
+a
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+## Model Selection
+
+Here, model selection can be directly done with the expected 
+prediction error of the learning procedure.
+This will be done using cross validation.
+The root-mean-squared-error (RMSE) of the log of the target variable
+is defined as error.
+
+```{r}
+L <- function(Y, Yh) sqrt(sum((Y - Yh)^2) / length(Y))
+```
+
+Inside the cross validation a prediction function will
+train a MARS model on one part of the training set 
+and then predict the other.
+The RMSE for the prediction will be returned.
+
+```{r}
+predMARS <- function(trainX, trainY, testX, testY, ...) {
+  fit <- earth(trainX, trainY, nk = 200, ...)
+  pred <- predict(fit, newdata = testX)
+  return(L(testY, pred[, 1]))
+}
+```
+
+Splitting of the data and execution of the prediction function is performed
+by `crossval`.
+For each model it will repeat a 5-fold cross validation 10 times.
+The resulting mean RMSE and its standard error are stored in a list.
+
+```{r}
+CV <- list()
+CV$Add <- crossval(predMARS, X, Y, 
+                   verbose = FALSE, K = 5, B = 10)
+CV$Add_imp <- crossval(predMARS, Ximp, Y, 
+                       verbose = FALSE, K = 5, B = 10)
+CV$Add_small <- crossval(predMARS, Xsmall, Y, 
+                         verbose = FALSE, K = 5, B = 10)
+# CV$Int <- crossval(predMARS, X, Y, degree = 2, 
+#                    verbose = FALSE, K = 5, B = 10)
+# CV$Int_imp <- crossval(predMARS, Ximp, Y, degree = 2, 
+#                        verbose = FALSE, K = 5, B = 10)
+# CV$Int_small <- crossval(predMARS, Xsmall, Y, degree = 2, 
+#                          verbose = FALSE, K = 5, B = 10)
+```
+
+Cases with interaction terms take to long to compute on kaggle, so they are
+commented out.
+Overall they performed worse than their additive counterparts.
+Estimated RMSEs for all models are shown below.
+
+```{r}
+l <- lapply(CV, function(i) data.frame(RMSE = i$stat, se = i$stat.se))
+res <- do.call(rbind, l)
+res$Model <- rownames(res)
+ggplot(res, aes(x = Model, y = RMSE)) +
+  geom_pointrange(aes(ymax = RMSE + se, ymin = RMSE - se), color = "blue") +
+  coord_flip() +
+  ggtitle("CV-Estimated RMSE with Standard Error") +
+  theme_classic()
+```
+
+
+
+## Final Model
+
+*Add_imp* will be trained as final model.
+
+```{r}
+fit <- earth(Ximp, Y, nk = 200)
+plot(fit)
+summary(fit, decomp = "none")
+```
+
+The summary shows the terms in the order they were added during the
+forward pass.
+2 hinge functions for *OverallQual* and *GrLivArea* were added first.
+These were also the most important features identified by the Boruta analysis.
+
+Another way to estimate the variable importance is by looking at 
+the number of terms in which they were used.
+This is shown below in the column *nsubsets*.
+The order of variables changed here compared to the summary.
+
+```{r}
+evimp(fit)[1:10, ]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Prediction
+
+Finally the test set can be predicted.
+
+```{r}
+Xtest <- test[, impVars, with = FALSE]
+pred <- predict(fit, newdata = Xtest)[, 1]
+```
+
+The actual prices are shown below.
+
+```{r}
+prices <- exp(pred)
+summary(prices)
+ggplot(data.frame(Yh = prices), aes(x = Yh)) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(trans = "log10") +
+  theme_bw()
+```
+
+That's it!
+Thanks for reading through this whole thing.
+If you have any suggestions, comments are welcome.
+
+```{r}
+df <- data.frame(
+  Id = test$Id,
+  SalePrice = prices
+)
+write.csv(df, file = "MARS_submission.csv", row.names = FALSE, quote = FALSE)
+```
+
+
+
+
+***
