@@ -29,10 +29,10 @@ The actual feature analysis was done in another kernel.
 
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 library(data.table) # database-like tables
+library(Matrix) # sparse matrices
 library(ggplot2) # general plots
-library(vcd) # stats for categories
 library(mice) # imputation
-library(earth) # MARS
+library(xgboost) # xtreme gradient boosting
 library(crossval) # doing CV
 test <- data.table(read.csv("../input/test.csv"))
 train <- data.table(read.csv("../input/train.csv"))
@@ -234,6 +234,17 @@ for (j in ordVars) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
 # Modeling
 
 
@@ -243,137 +254,335 @@ for (j in ordVars) {
 The dataset is split back into training and test.
 
 ```{r}
-train <- full[label == "train", !"label"]
-test <- full[label == "test", !c("label", "SalePrice")]
-X <- train[, !"SalePrice"]
+train <- full[label == "train", !c("Id", "label")]
+rownames(train) <- full[label == "train", Id]
+test <- full[label == "test", !c("Id", "label", "SalePrice")]
+rownames(test) <- full[label == "test", Id]
+```
+
+Categorical variables are still coded as factors.
+Here, they are split up into binary dummy variables.
+
+```{r}
+X <- sparse.model.matrix(~ -1 + ., data = train[, !"SalePrice"])
 Y <- train$SalePrice
 ```
-
-Instead of using all features one could also use the set of features
-labelled important by the Boruta analysis.
-Then, the binary features could be added or removed from either set.
-
-```{r}
-Ximp <- X[, impVars, with = FALSE]
-Xsmall <- X[, c(impVars, binVars), with = FALSE]
-```
-
-## Training
-
-
-```{r}
-library(xgboost)
-
-
-# load data
-data(agaricus.train, package='xgboost')
-data(agaricus.test, package='xgboost')
-train <- agaricus.train
-test <- agaricus.test
-# fit model
-bst <- xgboost(data = train$data, label = train$label, max.depth = 1, eta = 1, nround = 3,
-               nthread = 2, objective = "binary:logistic")
-summary(bst)
-# predict
-pred <- predict(bst, test$data)
-
-# plot trees
-xgb.plot.tree(feature_names = agaricus.train$data@Dimnames[[2]], model = bst)
-xgb.plot.multi.trees(model = bst, feature_names = agaricus.train$data@Dimnames[[2]], features.keep = 3)
-
-# feature importance
-importance_matrix <- xgb.importance(agaricus.train$data@Dimnames[[2]], model = bst)
-xgb.plot.importance(importance_matrix)
-
-# depth of leaves
-xgb.plot.deepness(model = bst)
-
-a
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-```
-
 
 
 ## Model Selection
 
-Here, model selection can be directly done with the expected 
-prediction error of the learning procedure.
-This will be done using cross validation.
-The root-mean-squared-error (RMSE) of the log of the target variable
-is defined as error.
+To see overfitting in the training, the training set must be split up again
+into a validation and a training set.
+The model will be repeatedly fitted on the training set, the progress is
+observed on the performance of the fitted model on the validation set.
+Here, a random 25% validation 75% training set split is chosen.
+The training set should be big to enable a good training,
+but the validation set must still be big enough 
+to capture structures within the data and correctly estimate the 
+performance of the fitted model.
+> I hope 25% is still big enough on 1460 data points
 
 ```{r}
-L <- function(Y, Yh) sqrt(sum((Y - Yh)^2) / length(Y))
+set.seed(42)
+split <- sample(1:nrow(X), round(nrow(X) / 4))
+dtrain <- xgb.DMatrix(data = X[-split, ], label = Y[-split])
+dval <- xgb.DMatrix(data = X[split, ], label = Y[split])
 ```
 
-Inside the cross validation a prediction function will
-train a MARS model on one part of the training set 
-and then predict the other.
-The RMSE for the prediction will be returned.
+### Quadratic Loss
+
+Regression trees will be the base learners of this boosting model.
+The function to optimize is the *objective* which has a usual loss function
+and a function to penalize complexity.
+In the linear regression setting the loss function is a quadratic loss.
+
+> Doc says 'linear regression' so I assume it's a quadratic loss.
+
+In a MART fashion the algorithm will add one tree after another, fitting
+the new trew to the *pseudo-residuals* of the previous one.
+Regularization for this process comes in many forms.
+
+Parameter $\eta$ (the stepsize) reduces the influence of each newly learned 
+tree. 
+It is closely related to $L_1$ regularization in linear regression.
+$\eta$ is usually set very small $<0.1$.
+The smaller $\eta$ is, the slower the model learns.
+So, more iterations are needed as well.
+The strategy here is to compute enough iterations for a given $\eta$,
+watch the validation error, and then chose the number of iterations
+with the minimum validation error.
+
+> I start with 10000 iterations and eta = 0.01 
+
+The maximum allowed tree depth per model is another parameter
+which can limit the complexity of the model.
+High maximum tree depth (> 6) would represent interactions of many 
+variables in the data.
+A MARS model that I fitted on the data earlier suggested no interactions.
+(Additive models did perform better than models with interaction terms)
+Therefore, small trees or stumps seem to be more approprate here.
+
+> I will look around a maxdepth of 2 or 4
+
+Some additional parameter which reduces overfitting is the subsampling rate.
+This is the proportion of data points which get sampled 
+(without replacement) before fitting each tree.
+A usual value here is 50%.
+This reduces the learning process as well, but it also speeds up computation.
+Here is one initial run:
+
+```{r, results='hide'}
+fit <- xgb.train(booster = "gbtree", data = dtrain,  eta = .01, max.depth = 4, 
+                 subsample = .5, nround = 10000, objective = "reg:linear",
+                 watchlist = list(train = dtrain, test = dval))
+```
+
+By default `xgb.train` already computes RMSE on the training and validation set
+in the lienar regression setting.
+Below is a plot of the learning process.
+10000 iterations seem sufficient to reach minimum test error 
+when $\eta = 0.01$ and 50% subsampling is used.
+
+```{r, warning=FALSE}
+dt <- melt(fit$evaluation_log, "iter", c("train_rmse", "test_rmse"))
+ggplot(dt) + 
+  geom_path(aes(x = iter, y = value, color = variable)) + 
+  scale_y_continuous(limits = c(0, .2)) +
+  theme_bw()
+```
+
+There are some tools to inspect the model.
+The plot below shows the number of leafs and weighted number of observations 
+(cover) which end up at certain tree depth.
+With this settings trees are mostly built to full (maximum) length.
+
+
+One can prevent the formation of leafs by setting a minimum child weight.
+A split would not be performed if both partitions would not get a minimum
+number of observations.
+
+> As far as I know, in the regression setting the number of observations ending
+up in a single leaf can be directly translated to child weight.
+
+Appropriate numbers for minimum child weight have to be found.
+From the plot below, it seems that for a maximum tree depth of 4 
+it would not make sense to look for minimum child weights above around 150.
 
 ```{r}
-predMARS <- function(trainX, trainY, testX, testY, ...) {
-  fit <- earth(trainX, trainY, nk = 200, ...)
-  pred <- predict(fit, newdata = testX)
-  return(L(testY, pred[, 1]))
+xgb.plot.deepness(model = fit)
+```
+
+There is another parameter $\gamma$ which prevents trees from growing.
+It only allows to further grow a tree if a minimum increase in RMSE (here)
+is achieved by the partition.
+Looking at the RMSE differences of the run above, a very low $\gamma$ seems
+appropriate.
+
+Then, there are some parameters where I have no idea where to start.
+One is $\alpha$, which is a $L_1$ regularization for weights.
+The other is $colsample_bytree$.
+This is another sampling method which samples a proportion of 
+variables (columns in $X$) before building each tree.
+
+> I will just try out some vlaues here...
+
+This is the final parameter grid:
+
+```{r}
+pars.grid <- expand.grid(
+  eta = c(0.01, 0.005),
+  gamma = c(0, 0.01),
+  max_depth = c(2, 4),
+  min_child_weight = c(1, 50, 100),
+  alpha = c(0, 0.5),
+  colsample_bytree = c(1, 0.8)
+)
+```
+
+Each parameter combination will be trained and the lowest RMSE and its 
+iteration number for each parameter combination will be returned.
+An early stopping condition is added, so that the process stops if
+after 1000 iterations there has not been any decrease in RMSE.
+
+```{r}
+train.grid <- function(train, val, pars, n = 10000, subs = .5,
+                       bstr = "gbtree", objFun = NULL) {
+  N <- nrow(pars)
+  out <- data.frame(iter = integer(N), rmse = numeric(N))
+  for (i in seq_len(N)) {
+    fit <- xgb.train(booster = bstr, data = train, eta = pars$eta[i], 
+                     gamma = pars$gamma[i], max.depth = pars$max_depth[i], 
+                     min_child_weight = pars$min_child_weight[i], 
+                     subsample = subs, alpha = pars$alpha[i], 
+                     colsample_bytree = pars$colsample_bytree[i], 
+                     nround = n, watchlist = list(train = dtrain, test = dval), 
+                     obj = objFun, early_stopping_rounds = 1000)  
+    dt <- fit$evaluation_log
+    idx <- which.min(dt$test_rmse)
+    out$iter[i] <- idx
+    out$rmse[i] <- dt$test_rmse[idx]  
+  }
+  return(out)
 }
 ```
 
-Splitting of the data and execution of the prediction function is performed
-by `crossval`.
-For each model it will repeat a 5-fold cross validation 10 times.
-The resulting mean RMSE and its standard error are stored in a list.
+The training is done below.
+For the Kaggle kernel this is commented. (It will run a few minutes)
+The code below summarizes the results of all parameter combinations as
+a plot.
 
-```{r}
-CV <- list()
-CV$Add <- crossval(predMARS, X, Y, 
-                   verbose = FALSE, K = 5, B = 10)
-CV$Add_imp <- crossval(predMARS, Ximp, Y, 
-                       verbose = FALSE, K = 5, B = 10)
-CV$Add_small <- crossval(predMARS, Xsmall, Y, 
-                         verbose = FALSE, K = 5, B = 10)
-# CV$Int <- crossval(predMARS, X, Y, degree = 2, 
-#                    verbose = FALSE, K = 5, B = 10)
-# CV$Int_imp <- crossval(predMARS, Ximp, Y, degree = 2, 
-#                        verbose = FALSE, K = 5, B = 10)
-# CV$Int_small <- crossval(predMARS, Xsmall, Y, degree = 2, 
-#                          verbose = FALSE, K = 5, B = 10)
+```{r, results='hide'}
+res <- train.grid(dtrain, dval, pars.grid)
 ```
 
-Cases with interaction terms take to long to compute on kaggle, so they are
-commented out.
-Overall they performed worse than their additive counterparts.
-Estimated RMSEs for all models are shown below.
+```{r, results='hide', echo=FALSE}
+saveRDS(res, "res1.rds")
+```
+
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = min_child_weight, y = rmse)) +
+ geom_point(aes(color = as.factor(eta), shape = as.factor(alpha))) +
+ facet_grid(max_depth ~ gamma + colsample_bytree) +
+ theme_bw()
+```
+
+On the plot above the effects of different parameters are nicely visible.
+Tree depth 2 is overall better than 4, 
+increasing minimum child weight increased RMSE,
+$\eta$ of 0.01 is better than 0.005 (maybe that would need more iterations),
+$L_1$ regularization increased error overall,
+a $\gamma$ of 0.01 did slightly better than 0,
+in some cases the 80% column sampling by tree decreased RMSE slightly.
+The differences in RMSE for minimum child weight seem most drastic with
+$\Delta$RMSE of 0.01, followed by $\eta$ with $\Delta$RMSE of around 0.005.
+The best parameter combination is:
+
+```{r}
+pars1 <- list(
+  iter = 7366,
+  eta = 0.01,
+  gamma = 0.01,
+  max_depth = 2,
+  min_child_weight = 1,
+  alpha = 0,
+  colsample_bytree = 0.8
+)
+```
+
+### Huber Loss
+
+Quadratic loss can be sensitive to outliers.
+Other loss functions, such as the Huber loss, 
+become linear with increasing residual vlaues.
+`xgb.train` allows to provide custom loss functions.
+
+The function below should describe a Huber loss.
+It takes predictions and the training object
+and returns first and second order gradients.
+
+```{r}
+Huber <- function(preds, dtrain) {
+  labels <- getinfo(dtrain, "label")
+  grad <- ifelse(abs(preds - labels < 1.5),
+                 preds - labels,
+                 1.5 * sign(preds - labels))
+  hess <- ifelse(abs(preds - labels < 1.5), 1, 0)
+  return(list(grad = grad, hess = hess))
+}
+```
+
+The same parameter grid as above is trained.
+Again, it is commented for the Kaggle kernel.
+
+```{r, results='hide'}
+res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
+```
+
+```{r, results='hide', echo=FALSE}
+saveRDS(res, "res2.rds")
+```
+
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = min_child_weight, y = rmse)) +
+  geom_point(aes(color = as.factor(eta), shape = as.factor(alpha))) +
+  facet_grid(max_depth ~ gamma + colsample_bytree) +
+  theme_bw()
+```
+
+The results are the same.
+For small residuals the Huber and Quadratic loss are identical.
+It seems that the Huber loss was not really necessary here.
+
+```{r}
+pars2 <- list(
+  iter = 7366,
+  eta = 0.01,
+  gamma = 0.01,
+  max_depth = 2,
+  min_child_weight = 1,
+  alpha = 0,
+  colsample_bytree = 0.8
+)
+```
+
+
+### RMSE Estimation
+
+To correctly estimate the RMSE of this method, the whole procedure
+(including grid search and parameter selection)
+would need to be plugged into a repeated cross-validation.
+Again, this is not feasible in the Kaggle kernel.
+
+Here, only the two models quadratic loss with `pars1` 
+and Huber loss with `pars2` are compared in a cross validation.
+Since these were derived from 75% of the whole training set
+the RMSE predictions will be biased downward (better RMSE).
+Nevertheless, the results can be used to chose one of the two methods.
+For that the full training set is restored and parameters are 
+combined in a list.
+
+```{r}
+dtrain <- xgb.DMatrix(data = X, label = Y)
+pars0 <- list(
+  subsample = .5,
+  booster = "gbtree"
+)
+pars <- c(pars0, pars1)
+```
+
+Inside the cross validation, the model is fit with the specified parameters
+for the specified number of rounds.
+
+```{r}
+RMSE <- function(Y, Yh) sqrt(sum((Y - Yh)^2) / length(Y))
+predXGB <- function(trainX, trainY, testX, testY, ...) {
+  dtrain <- xgb.DMatrix(data = trainX, label = trainY)
+  fit <- xgb.train(params = pars, nrounds = pars$iter, data = dtrain, ...) 
+  pred <- predict(fit, testX)
+  return(RMSE(testY, pred))
+}
+```
+
+The 5-fold cross validation is repeated 3 times.
+It returns mean RMSE and its standard error.
+
+```{r, results='hide'}
+CV <- list()
+CV$Quad <- crossval(predXGB, X, Y, K = 5, B = 3)
+```
+
+The same is repeated for the Huber loss model.
+
+```{r, results='hide'}
+pars <- c(pars0, pars2)
+CV$Huber <- crossval(predXGB, X, Y, K = 5, B = 3, obj = Huber)
+```
+
+Mean RMSEs and their standard error are shown below.
 
 ```{r}
 l <- lapply(CV, function(i) data.frame(RMSE = i$stat, se = i$stat.se))
@@ -388,29 +597,6 @@ ggplot(res, aes(x = Model, y = RMSE)) +
 
 
 
-## Final Model
-
-*Add_imp* will be trained as final model.
-
-```{r}
-fit <- earth(Ximp, Y, nk = 200)
-plot(fit)
-summary(fit, decomp = "none")
-```
-
-The summary shows the terms in the order they were added during the
-forward pass.
-2 hinge functions for *OverallQual* and *GrLivArea* were added first.
-These were also the most important features identified by the Boruta analysis.
-
-Another way to estimate the variable importance is by looking at 
-the number of terms in which they were used.
-This is shown below in the column *nsubsets*.
-The order of variables changed here compared to the summary.
-
-```{r}
-evimp(fit)[1:10, ]
-```
 
 
 
@@ -421,69 +607,6 @@ evimp(fit)[1:10, ]
 
 
 
-
-
-
-
-
-
-
-
-
-
-***
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Prediction
-
-Finally the test set can be predicted.
-
-```{r}
-Xtest <- test[, impVars, with = FALSE]
-pred <- predict(fit, newdata = Xtest)[, 1]
-```
-
-The actual prices are shown below.
-
-```{r}
-prices <- exp(pred)
-summary(prices)
-ggplot(data.frame(Yh = prices), aes(x = Yh)) +
-  geom_histogram(bins = 30) +
-  scale_x_continuous(trans = "log10") +
-  theme_bw()
-```
-
-That's it!
-Thanks for reading through this whole thing.
-If you have any suggestions, comments are welcome.
-
-```{r}
-df <- data.frame(
-  Id = test$Id,
-  SalePrice = prices
-)
-write.csv(df, file = "MARS_submission.csv", row.names = FALSE, quote = FALSE)
-```
 
 
 
