@@ -295,8 +295,7 @@ Regression trees will be the base learners of this boosting model.
 The function to optimize is the *objective* which has a usual loss function
 and a function to penalize complexity.
 In the linear regression setting the loss function is a quadratic loss.
-
-> Doc says 'linear regression' so I assume it's a quadratic loss.
+(Doc says 'linear regression' so I assume it's a quadratic loss.)
 
 In a MART fashion the algorithm will add one tree after another, fitting
 the new trew to the *pseudo-residuals* of the previous one.
@@ -311,8 +310,7 @@ So, more iterations are needed as well.
 The strategy here is to compute enough iterations for a given $\eta$,
 watch the validation error, and then chose the number of iterations
 with the minimum validation error.
-
-> I start with 10000 iterations and eta = 0.01 
+(I start with 10000 iterations and eta = 0.01 )
 
 The maximum allowed tree depth per model is another parameter
 which can limit the complexity of the model.
@@ -321,8 +319,7 @@ variables in the data.
 A MARS model that I fitted on the data earlier suggested no interactions.
 (Additive models did perform better than models with interaction terms)
 Therefore, small trees or stumps seem to be more approprate here.
-
-> I will look around a maxdepth of 2 or 4
+(I will look around a maxdepth of 2, 4, 6 first).
 
 Some additional parameter which reduces overfitting is the subsampling rate.
 This is the proportion of data points which get sampled 
@@ -356,17 +353,15 @@ The plot below shows the number of leafs and weighted number of observations
 (cover) which end up at certain tree depth.
 With this settings trees are mostly built to full (maximum) length.
 
-
 One can prevent the formation of leafs by setting a minimum child weight.
 A split would not be performed if both partitions would not get a minimum
 number of observations.
-
-> As far as I know, in the regression setting the number of observations ending
-up in a single leaf can be directly translated to child weight.
+(As far as I know, in the regression setting the number of observations ending
+up in a single leaf can be directly translated to child weight.)
 
 Appropriate numbers for minimum child weight have to be found.
 From the plot below, it seems that for a maximum tree depth of 4 
-it would not make sense to look for minimum child weights above around 150.
+it would not make sense to look for minimum child weights above around 80.
 
 ```{r}
 xgb.plot.deepness(model = fit)
@@ -375,8 +370,6 @@ xgb.plot.deepness(model = fit)
 There is another parameter $\gamma$ which prevents trees from growing.
 It only allows to further grow a tree if a minimum increase in RMSE (here)
 is achieved by the partition.
-Looking at the RMSE differences of the run above, a very low $\gamma$ seems
-appropriate.
 
 Then, there are some parameters where I have no idea where to start.
 One is $\alpha$, which is a $L_1$ regularization for weights.
@@ -384,18 +377,23 @@ The other is $colsample_bytree$.
 This is another sampling method which samples a proportion of 
 variables (columns in $X$) before building each tree.
 
-> I will just try out some vlaues here...
+**Tree Depth**
 
-This is the final parameter grid:
+The maximum tree depth and minimum child weight have a huge influence on the
+model.
+First, their best values are found.
+Therefore, a first grid search in big steps is performed.
+This is the first grid:
 
 ```{r}
 pars.grid <- expand.grid(
-  eta = c(0.01, 0.005),
-  gamma = c(0, 0.01),
-  max_depth = c(2, 4),
-  min_child_weight = c(1, 50, 100),
-  alpha = c(0, 0.5),
-  colsample_bytree = c(1, 0.8)
+  eta = 0.01,
+  gamma = 0,
+  max_depth = c(2, 4, 6),
+  min_child_weight = c(1, 20, 40, 80),
+  alpha = 0,
+  subsample = 0.5,
+  colsample_bytree = 0.8
 )
 ```
 
@@ -405,18 +403,18 @@ An early stopping condition is added, so that the process stops if
 after 1000 iterations there has not been any decrease in RMSE.
 
 ```{r}
-train.grid <- function(train, val, pars, n = 10000, subs = .5,
-                       bstr = "gbtree", objFun = NULL) {
+train.grid <- function(train, val, pars, n = 10000, 
+                       bstr = "gbtree", objFun = NULL, nstop = 1000) {
   N <- nrow(pars)
   out <- data.frame(iter = integer(N), rmse = numeric(N))
   for (i in seq_len(N)) {
     fit <- xgb.train(booster = bstr, data = train, eta = pars$eta[i], 
                      gamma = pars$gamma[i], max.depth = pars$max_depth[i], 
                      min_child_weight = pars$min_child_weight[i], 
-                     subsample = subs, alpha = pars$alpha[i], 
+                     subsample = pars$subsample[i], alpha = pars$alpha[i], 
                      colsample_bytree = pars$colsample_bytree[i], 
                      nround = n, watchlist = list(train = dtrain, test = dval), 
-                     obj = objFun, early_stopping_rounds = 1000)  
+                     obj = objFun, early_stopping_rounds = nstop)  
     dt <- fit$evaluation_log
     idx <- which.min(dt$test_rmse)
     out$iter[i] <- idx
@@ -427,7 +425,8 @@ train.grid <- function(train, val, pars, n = 10000, subs = .5,
 ```
 
 The training is done below.
-For the Kaggle kernel this is commented. (It will run a few minutes)
+For the Kaggle kernel all these grid ssearches are commented. 
+(They all run for a few minutes)
 The code below summarizes the results of all parameter combinations as
 a plot.
 
@@ -435,41 +434,148 @@ a plot.
 res <- train.grid(dtrain, dval, pars.grid)
 ```
 
-```{r, results='hide', echo=FALSE}
-saveRDS(res, "res1.rds")
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = min_child_weight, y = rmse)) +
+ geom_point(aes(color = as.factor(max_depth))) +
+ theme_bw()
+```
+
+Minimum child weight of 0 is the best for all tree depths.
+The maximum tree depth parameter performs differently depending on the
+minimum child weight, but for child weight 0, 2 is best.
+In the next grid a smaller area of the same parameter space is searched.
+
+```{r, results='hide'}
+pars.grid <- expand.grid(
+  eta = 0.01,
+  gamma = 0,
+  max_depth = c(1, 2, 3),
+  min_child_weight = c(1, 5, 10),
+  alpha = 0,
+  subsample = 0.5,
+  colsample_bytree = 0.8
+)
+res <- train.grid(dtrain, dval, pars.grid)
 ```
 
 ```{r}
 df <- cbind(res, pars.grid)
 df[which.min(df$rmse), ]
 ggplot(df, aes(x = min_child_weight, y = rmse)) +
- geom_point(aes(color = as.factor(eta), shape = as.factor(alpha))) +
- facet_grid(max_depth ~ gamma + colsample_bytree) +
+ geom_point(aes(color = as.factor(max_depth))) +
  theme_bw()
 ```
 
-On the plot above the effects of different parameters are nicely visible.
-Tree depth 2 is overall better than 4, 
-increasing minimum child weight increased RMSE,
-$\eta$ of 0.01 is better than 0.005 (maybe that would need more iterations),
-$L_1$ regularization increased error overall,
-a $\gamma$ of 0.01 did slightly better than 0,
-in some cases the 80% column sampling by tree decreased RMSE slightly.
-The differences in RMSE for minimum child weight seem most drastic with
-$\Delta$RMSE of 0.01, followed by $\eta$ with $\Delta$RMSE of around 0.005.
-The best parameter combination is:
+A minimum child weight of 1 with a maximum tree depth of 3 performs best.
+Again, child weight has the highest influence.
+
+**Regularization**
+
+Next, $\gamma$ and $\alpha$ are tested.
+
+```{r, results='hide'}
+pars.grid <- expand.grid(
+  eta = 0.01,
+  gamma = c(0, 0.1, 0.2, 0.3),
+  max_depth = 3,
+  min_child_weight = 1,
+  alpha = c(0, 0.3, 0.7),
+  subsample = 0.5,
+  colsample_bytree = 0.8
+)
+res <- train.grid(dtrain, dval, pars.grid)
+```
+
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = gamma, y = rmse)) +
+ geom_point(aes(color = as.factor(alpha))) +
+ theme_bw()
+```
+
+$\gamma = 0$ and $\alpha = 0$ performed best.
+The differences here are in the range of 0.004 RMSE.
+
+**Subsampling**
+
+Next, row and column subsampling is analyzed.
+
+```{r, results='hide'}
+pars.grid <- expand.grid(
+  eta = 0.01,
+  gamma = 0,
+  max_depth = 3,
+  min_child_weight = 1,
+  alpha = 0,
+  subsample = c(0.3, 0.5, 0.8),
+  colsample_bytree = c(0.3, 0.5, 0.8)
+)
+res <- train.grid(dtrain, dval, pars.grid)
+```
+
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = colsample_bytree, y = rmse)) +
+ geom_point(aes(color = as.factor(subsample))) +
+ theme_bw()
+```
+
+30% column subsampling by tree performed best with 80% subsampling.
+The differences are now in the range of 0.001 RMSE.
+The best validation RMSE is now at 0.098.
+
+**Learning Rate**
+
+Finally, $\eta$ is set down further and the number of iterations is increased.
+The model learns really slow now, so the stopping condition is 
+increased to 5000.
+
+```{r, results='hide'}
+pars1 <- list(
+  eta = 0.005,
+  gamma = 0,
+  max_depth = 3,
+  min_child_weight = 1,
+  alpha = 0,
+  subsample = 0.8,
+  colsample_bytree = 0.3
+)
+fit <- xgb.train(params = pars1, data = dtrain,  nround = 100000, 
+                 objective = "reg:linear", early_stopping_rounds = 5000,
+                 watchlist = list(train = dtrain, test = dval))
+```
+
+This model reached a minimum RMSE of 0.098 at around 20000 iterations.
+The improvement is something below 0.0001 RMSE.
+
+```{r}
+dt <- melt(fit$evaluation_log, "iter", c("train_rmse", "test_rmse"))
+ggplot(dt) + 
+  geom_path(aes(x = iter, y = value, color = variable)) + 
+  scale_y_continuous(limits = c(0, .2)) +
+  theme_bw()
+```
+
+That's not really worth it, so I keep the model with $\eta = 0.01$ 
+which reached its minimum validation RMSE after 9887 iterations. 
 
 ```{r}
 pars1 <- list(
-  iter = 7366,
   eta = 0.01,
-  gamma = 0.01,
-  max_depth = 2,
+  gamma = 0,
+  max_depth = 3,
   min_child_weight = 1,
   alpha = 0,
-  colsample_bytree = 0.8
+  subsample = 0.8,
+  colsample_bytree = 0.3
 )
 ```
+
+
 
 ### Huber Loss
 
@@ -493,42 +599,162 @@ Huber <- function(preds, dtrain) {
 }
 ```
 
-The same parameter grid as above is trained.
-Again, it is commented for the Kaggle kernel.
+Now the same parameter search as above is performed again.
+
+**Tree Depth**
+
+Again a few initial parameters are searched.
+
+```{r}
+pars.grid <- expand.grid(
+  eta = 0.01,
+  gamma = 0,
+  max_depth = c(2, 4, 6),
+  min_child_weight = c(1, 20, 40, 80),
+  alpha = 0,
+  subsample = 0.5,
+  colsample_bytree = 0.8
+)
+```
 
 ```{r, results='hide'}
 res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
-```
-
-```{r, results='hide', echo=FALSE}
-saveRDS(res, "res2.rds")
 ```
 
 ```{r}
 df <- cbind(res, pars.grid)
 df[which.min(df$rmse), ]
 ggplot(df, aes(x = min_child_weight, y = rmse)) +
-  geom_point(aes(color = as.factor(eta), shape = as.factor(alpha))) +
-  facet_grid(max_depth ~ gamma + colsample_bytree) +
-  theme_bw()
+ geom_point(aes(color = as.factor(max_depth))) +
+ theme_bw()
 ```
 
-The results are the same.
-For small residuals the Huber and Quadratic loss are identical.
-It seems that the Huber loss was not really necessary here.
+As before, minimum child weight is the main parameter.
+Maximum depth of 2 and minimum child weight of 1 give the best training error,
+already below 0.1.
+In the next grid a smaller area of the same parameter space is searched.
+
+```{r, results='hide'}
+pars.grid <- expand.grid(
+  eta = 0.01,
+  gamma = 0,
+  max_depth = c(1, 2, 3),
+  min_child_weight = c(1, 5, 10),
+  alpha = 0,
+  subsample = 0.5,
+  colsample_bytree = 0.8
+)
+res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
+```
+
+Maximum depth of 2 and minimum child weight of 1 wins.
 
 ```{r}
-pars2 <- list(
-  iter = 7366,
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = min_child_weight, y = rmse)) +
+ geom_point(aes(color = as.factor(max_depth))) +
+ theme_bw()
+```
+
+**Regularization**
+
+Next, $\gamma$ and $\alpha$ are tested.
+
+```{r, results='hide'}
+pars.grid <- expand.grid(
   eta = 0.01,
-  gamma = 0.01,
+  gamma = c(0, 0.1, 0.2, 0.3),
+  max_depth = 2,
+  min_child_weight = 1,
+  alpha = c(0, 0.3, 0.7),
+  subsample = 0.5,
+  colsample_bytree = 0.8
+)
+res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
+```
+
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = gamma, y = rmse)) +
+ geom_point(aes(color = as.factor(alpha))) +
+ theme_bw()
+```
+
+As before $\gamma$ and $\alpha$ make things worse.
+
+**Subsampling**
+
+Next, row and column subsampling is analyzed.
+
+```{r, results='hide'}
+pars.grid <- expand.grid(
+  eta = 0.01,
+  gamma = 0,
   max_depth = 2,
   min_child_weight = 1,
   alpha = 0,
-  colsample_bytree = 0.8
+  subsample = c(0.3, 0.5, 0.8),
+  colsample_bytree = c(0.3, 0.5, 0.8)
 )
+res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
 ```
 
+80% row and 30% column subsampling wins.
+
+```{r}
+df <- cbind(res, pars.grid)
+df[which.min(df$rmse), ]
+ggplot(df, aes(x = colsample_bytree, y = rmse)) +
+ geom_point(aes(color = as.factor(subsample))) +
+ theme_bw()
+```
+
+**Learning Rate**
+
+Again it is tested whether slower learning rate increases performence.
+The model learns really slow now, so the stopping condition is 
+increased to 5000.
+
+```{r, results='hide'}
+pars2 <- list(
+  eta = 0.005,
+  gamma = 0,
+  max_depth = 2,
+  min_child_weight = 1,
+  alpha = 0,
+  subsample = 0.8,
+  colsample_bytree = 0.3
+)
+fit <- xgb.train(params = pars2, data = dtrain,  nround = 100000, 
+                 early_stopping_rounds = 5000, obj = Huber,
+                 watchlist = list(train = dtrain, test = dval))
+```
+
+This time the test RMSE went below 0.098 after 36716 iterations.
+
+```{r}
+dt <- melt(fit$evaluation_log, "iter", c("train_rmse", "test_rmse"))
+ggplot(dt) + 
+  geom_path(aes(x = iter, y = value, color = variable)) + 
+  scale_y_continuous(limits = c(0, .2)) +
+  theme_bw()
+```
+
+I will keep this model.
+
+```{r}
+pars2 <- list(
+  eta = 0.005,
+  gamma = 0,
+  max_depth = 2,
+  min_child_weight = 1,
+  alpha = 0,
+  subsample = 0.8,
+  colsample_bytree = 0.3
+)
+```
 
 ### RMSE Estimation
 
@@ -542,16 +768,10 @@ and Huber loss with `pars2` are compared in a cross validation.
 Since these were derived from 75% of the whole training set
 the RMSE predictions will be biased downward (better RMSE).
 Nevertheless, the results can be used to chose one of the two methods.
-For that the full training set is restored and parameters are 
-combined in a list.
+For that the full training set is restored.
 
 ```{r}
 dtrain <- xgb.DMatrix(data = X, label = Y)
-pars0 <- list(
-  subsample = .5,
-  booster = "gbtree"
-)
-pars <- c(pars0, pars1)
 ```
 
 Inside the cross validation, the model is fit with the specified parameters
@@ -561,7 +781,7 @@ for the specified number of rounds.
 RMSE <- function(Y, Yh) sqrt(sum((Y - Yh)^2) / length(Y))
 predXGB <- function(trainX, trainY, testX, testY, ...) {
   dtrain <- xgb.DMatrix(data = trainX, label = trainY)
-  fit <- xgb.train(params = pars, nrounds = pars$iter, data = dtrain, ...) 
+  fit <- xgb.train(params = pars, data = dtrain, ...) 
   pred <- predict(fit, testX)
   return(RMSE(testY, pred))
 }
@@ -572,17 +792,21 @@ It returns mean RMSE and its standard error.
 
 ```{r, results='hide'}
 CV <- list()
-CV$Quad <- crossval(predXGB, X, Y, K = 5, B = 3)
+pars <- pars1
+CV$Quad <- crossval(predXGB, X, Y, nround = 9887, K = 5, B = 3)
 ```
 
 The same is repeated for the Huber loss model.
 
 ```{r, results='hide'}
-pars <- c(pars0, pars2)
-CV$Huber <- crossval(predXGB, X, Y, K = 5, B = 3, obj = Huber)
+pars <- pars2
+CV$Huber <- crossval(predXGB, X, Y, nround = 36716, K = 5, B = 3, obj = Huber)
 ```
 
 Mean RMSEs and their standard error are shown below.
+So, the quadratic loss model performed better.
+But it is also visible that it was overfitted to the training set.
+The mean RMSE by cross validation is slightly below 0.12.
 
 ```{r}
 l <- lapply(CV, function(i) data.frame(RMSE = i$stat, se = i$stat.se))
@@ -609,6 +833,122 @@ ggplot(res, aes(x = Model, y = RMSE)) +
 
 
 
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Prediction
+
+## Final Model
+
+The final model is fit to the training data.
+
+```{r, results='hide'}
+pars1 <- list(
+  eta = 0.01,
+  gamma = 0,
+  max_depth = 3,
+  min_child_weight = 1,
+  alpha = 0,
+  subsample = 0.8,
+  colsample_bytree = 0.3
+)
+dX <- xgb.DMatrix(data = X, label = Y)
+fit <- xgb.train(params = pars1, data = dX,  nround = 9887)
+```
+
+**Feature Importance**
+
+There are a few tools for inspecting the final model.
+For example feature imprtance can be estimated by the weighted abundance
+of each feature in the model.
+The 20 most important features are shown below.
+Like in the MARS model that I trained before *GrLivArea* and *OverallQual*
+are the two most imprtant features by far.
+The rank of features below however differes compared to the MARS model.
+
+```{r}
+dt <- xgb.importance(colnames(dX), fit)
+xgb.plot.importance(dt[1:20, ])
+```
+
+**Tree Structures**
+
+There is a tool that represents the tree ensemble as a single merged tree.
+Since the trees here have a maximum depth of 3, it should still be
+reasonable to plot it.
+Nodes in the graph is represent leafs and splits.
+Nodes with only one vertice represent leafs.
+
+```{r}
+xgb.plot.multi.trees(fit, colnames(dX))
+```
+
+**Partial Dependency Plots**
+
+The `ICEbox` package offers functions for partial dependency plots.
+With partial dependency plots one can visualize the influence of a single
+predictor variable on the target variable.
+The target is plotted with the desired predictor.
+Since the target is also dependent on the other predictors, which are not shown,
+the expected value of the target over all unseen predictors is shown.
+
+Below are the partial dependency plots for the 3 most important features.
+Note that the target *SalePrice* is still log transformed.
+Only 50% of the data points in $X$ are used.
+This speeds up computation.
+
+```{r}
+X <- model.matrix(~ -1 + ., data = train[, !"SalePrice"])
+Y <- train$SalePrice
+xgb.ice <- ice(fit, X, Y, "GrLivArea", frac_to_build = 0.5)
+plot(xgb.ice)
+xgb.ice <- ice(fit, X, Y, "OverallQual", frac_to_build = 0.5)
+plot(xgb.ice)
+xgb.ice <- ice(fit, X, Y, "TotalBsmtSF", frac_to_build = 0.5)
+plot(xgb.ice)
+```
+
+
+## Prediction
+
+Finally the test set can be predicted.
+
+```{r}
+Xtest <- sparse.model.matrix(~ -1 + ., data = test)
+pred <- predict(fit, Xtest)
+```
+
+The distribution of predicted sale prices is shown below.
+
+```{r}
+df <- data.frame(
+  Id = full[label == "test", Id],
+  SalePrice = exp(pred)
+)
+summary(df$SalePrice)
+ggplot(df, aes(x = SalePrice)) + geom_histogram(bins = 30) + theme_bw()
+```
+
+That's it!
+Thanks for reading through this whole thing.
+If you have any suggestions, I'm quite new to XGBoost, comments are welcome.
+
+```{r}
+write.csv(df, file = "XGB_submission.csv", row.names = FALSE, quote = FALSE)
+```
 
 
 ***
