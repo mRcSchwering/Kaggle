@@ -1,6 +1,6 @@
 ---
 title: "Housing Cri.. Prices"
-subtitle: "Model MARS"
+subtitle: "Model XGBoost"
 author: "Marc Schwering"
 output:
   html_document:
@@ -34,6 +34,7 @@ library(ggplot2) # general plots
 library(mice) # imputation
 library(xgboost) # xtreme gradient boosting
 library(crossval) # doing CV
+library(ICEbox) # partial dependency plots
 test <- data.table(read.csv("../input/test.csv"))
 train <- data.table(read.csv("../input/train.csv"))
 test$SalePrice <- NaN
@@ -271,22 +272,13 @@ Y <- train$SalePrice
 
 ## Model Selection
 
-To see overfitting in the training, the training set must be split up again
-into a validation and a training set.
-The model will be repeatedly fitted on the training set, the progress is
-observed on the performance of the fitted model on the validation set.
-Here, a random 25% validation 75% training set split is chosen.
-The training set should be big to enable a good training,
-but the validation set must still be big enough 
-to capture structures within the data and correctly estimate the 
-performance of the fitted model.
-> I hope 25% is still big enough on 1460 data points
+To see overfitting during parameter estimation the model must be validated
+on data which was not used for training.
+A cross validation will be done during each boosting iteration.
+Therefore, the whole training set is used for training and validation.
 
 ```{r}
-set.seed(42)
-split <- sample(1:nrow(X), round(nrow(X) / 4))
-dtrain <- xgb.DMatrix(data = X[-split, ], label = Y[-split])
-dval <- xgb.DMatrix(data = X[split, ], label = Y[split])
+dtrain <- xgb.DMatrix(data = X, label = Y)
 ```
 
 ### Quadratic Loss
@@ -329,21 +321,36 @@ This reduces the learning process as well, but it also speeds up computation.
 Here is one initial run:
 
 ```{r, results='hide'}
-fit <- xgb.train(booster = "gbtree", data = dtrain,  eta = .01, max.depth = 4, 
-                 subsample = .5, nround = 10000, objective = "reg:linear",
-                 watchlist = list(train = dtrain, test = dval))
+pars <- list(
+  eta = 0.01,
+  gamma = 0,
+  max_depth = c(2, 4, 6),
+  min_child_weight = c(1, 20, 40, 80),
+  alpha = 0,
+  subsample = 0.5,
+  colsample_bytree = 0.8
+)
+fit <- xgb.cv(params = pars, data = dtrain, nrounds = 10000, nfold = 5)
 ```
 
 By default `xgb.train` already computes RMSE on the training and validation set
 in the lienar regression setting.
-Below is a plot of the learning process.
+Below is a plot of the learning process showing mean RMSE and standard
+deviation for training and validation (*test*).
 10000 iterations seem sufficient to reach minimum test error 
 when $\eta = 0.01$ and 50% subsampling is used.
 
 ```{r, warning=FALSE}
-dt <- melt(fit$evaluation_log, "iter", c("train_rmse", "test_rmse"))
-ggplot(dt) + 
-  geom_path(aes(x = iter, y = value, color = variable)) + 
+dt <- fit$evaluation_log
+df <- data.frame(
+  iter = rep(dt$iter, 2),
+  set = rep(c("train", "test"), each = nrow(dt)),
+  mean = c(dt$train_rmse_mean, dt$test_rmse_mean),
+  sd = c(dt$train_rmse_std, dt$test_rmse_std)
+)
+ggplot(df, aes(x = iter, y = mean, group = set)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd), alpha = .3) +
+  geom_path(aes(color = set)) +
   scale_y_continuous(limits = c(0, .2)) +
   theme_bw()
 ```
@@ -402,6 +409,8 @@ iteration number for each parameter combination will be returned.
 An early stopping condition is added, so that the process stops if
 after 1000 iterations there has not been any decrease in RMSE.
 
+> In Kaggle these grid searches are commented
+
 ```{r}
 train.grid <- function(train, val, pars, n = 10000, 
                        bstr = "gbtree", objFun = NULL, nstop = 1000) {
@@ -444,14 +453,14 @@ ggplot(df, aes(x = min_child_weight, y = rmse)) +
 
 Minimum child weight of 0 is the best for all tree depths.
 The maximum tree depth parameter performs differently depending on the
-minimum child weight, but for child weight 0, 2 is best.
+minimum child weight, but for child weight 0, 6 is best.
 In the next grid a smaller area of the same parameter space is searched.
 
 ```{r, results='hide'}
 pars.grid <- expand.grid(
   eta = 0.01,
   gamma = 0,
-  max_depth = c(1, 2, 3),
+  max_depth = c(5, 6, 7),
   min_child_weight = c(1, 5, 10),
   alpha = 0,
   subsample = 0.5,
@@ -468,7 +477,7 @@ ggplot(df, aes(x = min_child_weight, y = rmse)) +
  theme_bw()
 ```
 
-A minimum child weight of 1 with a maximum tree depth of 3 performs best.
+A minimum child weight of 5 with a maximum tree depth of 7 performs best.
 Again, child weight has the highest influence.
 
 **Regularization**
@@ -479,8 +488,8 @@ Next, $\gamma$ and $\alpha$ are tested.
 pars.grid <- expand.grid(
   eta = 0.01,
   gamma = c(0, 0.1, 0.2, 0.3),
-  max_depth = 3,
-  min_child_weight = 1,
+  max_depth = 7,
+  min_child_weight = 5,
   alpha = c(0, 0.3, 0.7),
   subsample = 0.5,
   colsample_bytree = 0.8
@@ -507,8 +516,8 @@ Next, row and column subsampling is analyzed.
 pars.grid <- expand.grid(
   eta = 0.01,
   gamma = 0,
-  max_depth = 3,
-  min_child_weight = 1,
+  max_depth = 7,
+  min_child_weight = 5,
   alpha = 0,
   subsample = c(0.3, 0.5, 0.8),
   colsample_bytree = c(0.3, 0.5, 0.8)
@@ -524,7 +533,7 @@ ggplot(df, aes(x = colsample_bytree, y = rmse)) +
  theme_bw()
 ```
 
-30% column subsampling by tree performed best with 80% subsampling.
+80% column subsampling by tree with 30% subsampling performed best.
 The differences are now in the range of 0.001 RMSE.
 The best validation RMSE is now at 0.098.
 
@@ -538,11 +547,11 @@ increased to 5000.
 pars1 <- list(
   eta = 0.005,
   gamma = 0,
-  max_depth = 3,
-  min_child_weight = 1,
+  max_depth = 7,
+  min_child_weight = 5,
   alpha = 0,
-  subsample = 0.8,
-  colsample_bytree = 0.3
+  subsample = 0.3,
+  colsample_bytree = 0.8
 )
 fit <- xgb.train(params = pars1, data = dtrain,  nround = 100000, 
                  objective = "reg:linear", early_stopping_rounds = 5000,
@@ -553,6 +562,7 @@ This model reached a minimum RMSE of 0.098 at around 20000 iterations.
 The improvement is something below 0.0001 RMSE.
 
 ```{r}
+min(fit$evaluation_log$test_rmse)
 dt <- melt(fit$evaluation_log, "iter", c("train_rmse", "test_rmse"))
 ggplot(dt) + 
   geom_path(aes(x = iter, y = value, color = variable)) + 
@@ -567,11 +577,11 @@ which reached its minimum validation RMSE after 9887 iterations.
 pars1 <- list(
   eta = 0.01,
   gamma = 0,
-  max_depth = 3,
-  min_child_weight = 1,
+  max_depth = 7,
+  min_child_weight = 5,
   alpha = 0,
-  subsample = 0.8,
-  colsample_bytree = 0.3
+  subsample = 0.3,
+  colsample_bytree = 0.8
 )
 ```
 
@@ -622,23 +632,22 @@ res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
 ```
 
 ```{r}
+min(fit$evaluation_log$test_rmse)
 df <- cbind(res, pars.grid)
-df[which.min(df$rmse), ]
 ggplot(df, aes(x = min_child_weight, y = rmse)) +
  geom_point(aes(color = as.factor(max_depth))) +
  theme_bw()
 ```
 
 As before, minimum child weight is the main parameter.
-Maximum depth of 2 and minimum child weight of 1 give the best training error,
-already below 0.1.
+Maximum depth of 6 and minimum child weight of 1 give the best training error.
 In the next grid a smaller area of the same parameter space is searched.
 
 ```{r, results='hide'}
 pars.grid <- expand.grid(
   eta = 0.01,
   gamma = 0,
-  max_depth = c(1, 2, 3),
+  max_depth = c(5, 6, 7),
   min_child_weight = c(1, 5, 10),
   alpha = 0,
   subsample = 0.5,
@@ -647,7 +656,7 @@ pars.grid <- expand.grid(
 res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
 ```
 
-Maximum depth of 2 and minimum child weight of 1 wins.
+Maximum depth of 6 and minimum child weight of 5 wins.
 
 ```{r}
 df <- cbind(res, pars.grid)
@@ -665,8 +674,8 @@ Next, $\gamma$ and $\alpha$ are tested.
 pars.grid <- expand.grid(
   eta = 0.01,
   gamma = c(0, 0.1, 0.2, 0.3),
-  max_depth = 2,
-  min_child_weight = 1,
+  max_depth = 6,
+  min_child_weight = 5,
   alpha = c(0, 0.3, 0.7),
   subsample = 0.5,
   colsample_bytree = 0.8
@@ -682,7 +691,7 @@ ggplot(df, aes(x = gamma, y = rmse)) +
  theme_bw()
 ```
 
-As before $\gamma$ and $\alpha$ make things worse.
+$\gamma = 0$ and $\alpha = 0.3$ wins.
 
 **Subsampling**
 
@@ -692,16 +701,16 @@ Next, row and column subsampling is analyzed.
 pars.grid <- expand.grid(
   eta = 0.01,
   gamma = 0,
-  max_depth = 2,
-  min_child_weight = 1,
-  alpha = 0,
+  max_depth = 6,
+  min_child_weight = 5,
+  alpha = 0.3,
   subsample = c(0.3, 0.5, 0.8),
   colsample_bytree = c(0.3, 0.5, 0.8)
 )
 res <- train.grid(dtrain, dval, pars.grid, objFun = Huber)
 ```
 
-80% row and 30% column subsampling wins.
+50% row and 80% column subsampling wins.
 
 ```{r}
 df <- cbind(res, pars.grid)
@@ -721,11 +730,11 @@ increased to 5000.
 pars2 <- list(
   eta = 0.005,
   gamma = 0,
-  max_depth = 2,
-  min_child_weight = 1,
+  max_depth = 6,
+  min_child_weight = 5,
   alpha = 0,
-  subsample = 0.8,
-  colsample_bytree = 0.3
+  subsample = 0.5,
+  colsample_bytree = 0.8
 )
 fit <- xgb.train(params = pars2, data = dtrain,  nround = 100000, 
                  early_stopping_rounds = 5000, obj = Huber,
@@ -736,6 +745,7 @@ This time the test RMSE went below 0.098 after 36716 iterations.
 
 ```{r}
 dt <- melt(fit$evaluation_log, "iter", c("train_rmse", "test_rmse"))
+min(dt$value)
 ggplot(dt) + 
   geom_path(aes(x = iter, y = value, color = variable)) + 
   scale_y_continuous(limits = c(0, .2)) +
@@ -748,11 +758,11 @@ I will keep this model.
 pars2 <- list(
   eta = 0.005,
   gamma = 0,
-  max_depth = 2,
-  min_child_weight = 1,
+  max_depth = 6,
+  min_child_weight = 5,
   alpha = 0,
-  subsample = 0.8,
-  colsample_bytree = 0.3
+  subsample = 0.5,
+  colsample_bytree = 0.8
 )
 ```
 
@@ -804,9 +814,11 @@ CV$Huber <- crossval(predXGB, X, Y, nround = 36716, K = 5, B = 3, obj = Huber)
 ```
 
 Mean RMSEs and their standard error are shown below.
-So, the quadratic loss model performed better.
-But it is also visible that it was overfitted to the training set.
+It is obvious that the models were overfitted to the training set.
 The mean RMSE by cross validation is slightly below 0.12.
+The standard errors show, that the optimization in the range below
+0.01 RMSE is questionable.
+None of both models is significantly better than the other.
 
 ```{r}
 l <- lapply(CV, function(i) data.frame(RMSE = i$stat, se = i$stat.se))
@@ -856,15 +868,6 @@ ggplot(res, aes(x = Model, y = RMSE)) +
 The final model is fit to the training data.
 
 ```{r, results='hide'}
-pars1 <- list(
-  eta = 0.01,
-  gamma = 0,
-  max_depth = 3,
-  min_child_weight = 1,
-  alpha = 0,
-  subsample = 0.8,
-  colsample_bytree = 0.3
-)
 dX <- xgb.DMatrix(data = X, label = Y)
 fit <- xgb.train(params = pars1, data = dX,  nround = 9887)
 ```
@@ -910,14 +913,29 @@ Note that the target *SalePrice* is still log transformed.
 Only 50% of the data points in $X$ are used.
 This speeds up computation.
 
-```{r}
+```{r, results='hide'}
 X <- model.matrix(~ -1 + ., data = train[, !"SalePrice"])
 Y <- train$SalePrice
 xgb.ice <- ice(fit, X, Y, "GrLivArea", frac_to_build = 0.5)
+```
+
+```{r}
 plot(xgb.ice)
+```
+
+```{r, results='hide'}
 xgb.ice <- ice(fit, X, Y, "OverallQual", frac_to_build = 0.5)
+```
+
+```{r}
 plot(xgb.ice)
+```
+
+```{r, results='hide'}
 xgb.ice <- ice(fit, X, Y, "TotalBsmtSF", frac_to_build = 0.5)
+```
+
+```{r}
 plot(xgb.ice)
 ```
 
